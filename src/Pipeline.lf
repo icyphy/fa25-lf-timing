@@ -1,0 +1,56 @@
+target C {
+    timeout: 10s
+}
+
+reactor Sensor {
+    output out:int
+    timer t(500 ms, 1s)
+    
+    reaction(t) -> out {=
+        lf_set(out, -1);   
+    =}
+}
+
+reactor Processing {
+    
+    input in:int
+    output out:int
+    
+    // WCET = 2 s
+    reaction(in) -> out {=
+        if (in->value > 0) {
+            lf_sleep(MSEC(200));
+        } else {
+            lf_sleep(MSEC(100));
+        }
+        lf_set(out, in->value);
+    =}
+}
+
+reactor Actuator {
+    
+    input in:int
+    
+    // WCET = 3 s
+    reaction(in) {=
+        if (in->value > 0) {
+            lf_sleep(MSEC(100));
+        } else {
+            lf_sleep(MSEC(300));
+        }
+    =}
+
+    reaction(in) {=
+        lf_print("Everything is okay: lag = %lld", lf_time_physical() - lf_time_logical());
+    =} deadline(415 ms) {=
+        lf_print("Deadline missed! lag = %lld", lf_time_physical() - lf_time_logical());
+    =}
+}
+
+main reactor {
+    s = new Sensor()
+    p = new Processing()
+    a = new Actuator()
+    s.out -> p.in
+    p.out -> a.in
+}

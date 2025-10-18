@@ -1,0 +1,61 @@
+target C {
+    single-threaded: true
+}
+
+reactor Sensor {
+    output out1:int
+    output out2:int
+    timer t(500ms, 1s)
+    state up:bool = true
+    reaction(t) -> out1, out2 {=
+        if (self->up) {
+            lf_set_present(out1);
+        } else {
+            lf_set_present(out2);
+        }
+        self->up = !self->up;
+    =}
+}
+
+reactor Middle {
+    input in:int
+    output out:int
+    reaction(in) -> out {=
+        lf_sleep(MSEC(100));
+        lf_set_present(out);
+    =}
+}
+
+// Assumption: the platform executing processing is single-core.
+// The WCET analysis should realize that upstream sensor never
+// sets both output ports, so only one Middle gets invoked at
+// a tag. Therefore the WCET of Processing should be 100 ms, not 200 ms.
+reactor Processing {
+    input in1:int
+    input in2:int
+    output out1:int
+    output out2:int
+    m1 = new Middle()
+    m2 = new Middle()
+    in1 -> m1.in
+    in2 -> m2.in
+    m1.out -> out1
+    m2.out -> out2
+}
+
+reactor Actuator {
+    input in1:int
+    input in2:int
+    reaction(in1, in2) {==}
+}
+
+main reactor {
+    s = new Sensor()
+    p = new Processing()
+    a = new Actuator()
+    s.out1 -> p.in1
+    s.out2 -> p.in2
+    p.out1 -> a.in1
+    p.out2 -> a.in2
+}
+
