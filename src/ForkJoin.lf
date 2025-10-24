@@ -1,0 +1,51 @@
+// How to compute WCET if there are parallel paths?
+target C
+
+reactor Sensor {
+    output out1:int
+    output out2:int
+    timer t(500ms, 1s)
+    reaction(t) -> out1, out2 {=
+        lf_set_present(out1);
+        lf_set_present(out2);
+    =}
+}
+
+reactor Middle(duration:time=100ms) {
+    input in:int
+    output out:int
+    reaction(in) -> out {=
+        lf_sleep(self->duration);
+        lf_set_present(out);
+    =}
+}
+
+reactor Processing {
+    input in1:int
+    input in2:int
+    output out1:int
+    output out2:int
+    m1 = new Middle(duration=100ms)
+    m2 = new Middle(duration=200ms)
+    in1 -> m1.in
+    in2 -> m2.in
+    m1.out -> out1
+    m2.out -> out2
+}
+
+reactor Actuator {
+    input in1:int
+    input in2:int
+    reaction(in1, in2) {==}
+}
+
+main reactor {
+    s = new Sensor()
+    p = new Processing()
+    a = new Actuator()
+    s.out1 -> p.in1
+    s.out2 -> p.in2
+    p.out1 -> a.in1
+    p.out2 -> a.in2
+}
+

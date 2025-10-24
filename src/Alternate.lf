@@ -1,3 +1,11 @@
+/**
+ * This represents a harder version of ForkJoin.lf.
+ * Here the dependency graph structure indicates concurrency.
+ * However, the single-threaded property preclude concurrency.
+ * On the other hand, the reaction body in Sensor alternates
+ * its outputs, so there is only one output at a time.
+ * How to capture a tight end-to-end WCET bound in this case?
+ */
 target C {
     single-threaded: true
 }
