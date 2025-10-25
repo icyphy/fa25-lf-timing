@@ -16,7 +16,7 @@ reactor Processing {
     input in:int
     output out:int
     
-    // WCET = 2 s
+    // WCET = 200 ms
     reaction(in) -> out {=
         if (in->value > 0) {
             lf_sleep(MSEC(200));
@@ -31,7 +31,7 @@ reactor Actuator {
     
     input in:int
     
-    // WCET = 3 s
+    // WCET = 300 ms
     reaction(in) {=
         if (in->value > 0) {
             lf_sleep(MSEC(100));
