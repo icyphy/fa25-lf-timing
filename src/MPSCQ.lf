@@ -1,0 +1,76 @@
+target C {
+    timeout: 5 sec
+}
+
+reactor Producer(period: time = 1 sec) {
+    output out: int
+    state x: int = 0
+    timer t(0, period)
+
+    reaction(t) -> out {=
+        lf_set(out, self->x++);
+        lf_sleep(MSEC(20));
+    =}
+}
+
+reactor Queue(period: time = 250 msec, size: int = 16, chans: int = 1) {
+    input[chans] in: int
+    output out: int
+    timer t(0, period)
+
+    state front: int = 0
+    state back: int = 0
+    state elems: int = 0
+    state length: int = size
+    state queue: int*
+
+    reaction(startup) {=
+        self->queue = calloc(self->length, sizeof(int));    
+    =}
+
+    reaction(in) {=
+        for (int i = 0; i < in_width; i++) {
+            if (in[i]->is_present) {
+                if (self->elems == self->length) {
+                    lf_print("[ERROR] Queue full!");
+                } else {
+                    self->queue[self->back++] = in[i]->value;
+                    self->elems++;
+                    lf_print("[INFO] Received %d at (%lld, %d) with physical time %lld. Queue length: %d",
+                        in[i]->value, lf_time_logical_elapsed(),
+                        lf_tag().microstep, lf_time_physical_elapsed(),
+                        self->elems);
+                }
+            } 
+        }
+    =}
+
+    reaction(t) -> out {=
+        if (self->elems) {
+            lf_set(out, self->queue[self->front++]);
+            self->front = (self->front == self->length) ? 0 : self->front;
+            self->elems--;
+        }
+    =}
+}
+
+reactor Consumer {
+    input in: int
+
+    reaction(in) {=
+        lf_print("[INFO] Consumer: %d at (%lld, %d)", in->value,
+            lf_time_logical_elapsed(), lf_tag().microstep);
+    =}
+}
+
+// Multi-Producer Single-Consumer Queue
+federated reactor MPSCQ {
+    p1 = new Producer()
+    p2 = new Producer(period = 500 msec)
+    p3 = new Producer(period = 750 msec)
+    p4 = new Producer(period = 250 msec)
+    q = new Queue(chans = 4)
+    c = new Consumer()
+    p1.out, p2.out, p3.out, p4.out -> q.in
+    q.out -> c.in
+} 
