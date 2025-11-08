@@ -1,0 +1,103 @@
+# Apple-Silicon friendly; auto-picks the correct RISC-V toolchain for the container arch
+FROM ubuntu:22.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+SHELL ["/bin/bash", "-c"]
+
+# ----- Base deps -----
+RUN apt-get update && apt-get install -y \
+    git wget curl ca-certificates xz-utils file \
+    software-properties-common gnupg apt-transport-https \
+    python3 python3.10-venv python3-dev \
+    pkg-config build-essential cmake ninja-build \
+    graphviz libgraphviz-dev \
+    vim gcc \
+    openjdk-17-jdk \
+    verilator
+
+# ----- LLVM/Clang 16 -----
+RUN wget https://apt.llvm.org/llvm.sh && chmod +x llvm.sh && ./llvm.sh 16 && rm llvm.sh
+RUN apt-get install -y clang-16 llvm-16 \
+ && update-alternatives --install /usr/bin/clang clang /usr/bin/clang-16 100 \
+ && update-alternatives --install /usr/bin/llvm-config llvm-config /usr/bin/llvm-config-16 100
+
+# ----- Repos -----
+WORKDIR /home
+RUN git clone https://github.com/icyphy/gametime.git && cd gametime && git submodule update --init --recursive
+RUN git clone https://github.com/pretis/flexpret.git && cd flexpret && git submodule update --init --recursive
+
+# ----- gametime -----
+WORKDIR /home/gametime
+RUN python3 -m venv .venv
+RUN clang++-16 -shared -fPIC src/custom_passes/custom_inline_pass.cpp \
+    -o src/custom_passes/custom_inline_pass.so \
+    `llvm-config --cxxflags --ldflags --libs` \
+    -Wl,-rpath,$(llvm-config --libdir)
+# replace 'yaml' with 'pyyaml' in requirements
+RUN sed -i '/^yaml$/d' requirements.txt
+RUN .venv/bin/pip install -e . && .venv/bin/pip install -r requirements.txt
+
+# ----- xPack RISC-V GCC (arch-aware install; linux assets are .tar.gz) -----
+ARG XPACK_VER=14.2.0-2
+ENV XPACK_VER=${XPACK_VER}
+RUN set -eux; \
+  arch="$(dpkg --print-architecture)"; \
+  case "$arch" in \
+    amd64)  xarch=linux-x64  ;; \
+    arm64)  xarch=linux-arm64 ;; \
+    armhf|armel|arm) xarch=linux-arm ;; \
+    *) echo "Unsupported arch: $arch" >&2; exit 1 ;; \
+  esac; \
+  base="https://github.com/xpack-dev-tools/riscv-none-elf-gcc-xpack/releases/download/v${XPACK_VER}/xpack-riscv-none-elf-gcc-${XPACK_VER}-${xarch}"; \
+  # prefer .tar.gz (correct for 14.2.0-*), fallback to .tar.xz if ever needed
+  for ext in tar.gz tar.xz; do \
+    url="${base}.${ext}"; \
+    echo "Trying $url"; \
+    if curl -fsSL "$url" -o "/tmp/xpack.${ext}"; then \
+      if [ "$ext" = "tar.gz" ]; then tar -C /opt -xzf /tmp/xpack.tar.gz; else tar -C /opt -xJf /tmp/xpack.tar.xz; fi; \
+      break; \
+    fi; \
+  done; \
+  test -d "/opt/xpack-riscv-none-elf-gcc-${XPACK_VER}" || { echo "Failed to download/extract xPack" >&2; exit 1; }; \
+  ln -sf /opt/xpack-riscv-none-elf-gcc-${XPACK_VER}/bin/riscv-none-elf-* /usr/local/bin/; \
+  /usr/local/bin/riscv-none-elf-gcc --version
+
+# Make the prefix visible to env.bash even in non-interactive shells
+ENV RISCV_TOOL_PATH_PREFIX=/opt/xpack-riscv-none-elf-gcc-${XPACK_VER}
+
+# ----- sbt (Scala) -----
+RUN echo "deb https://repo.scala-sbt.org/scalasbt/debian all main" > /etc/apt/sources.list.d/sbt.list \
+ && echo "deb https://repo.scala-sbt.org/scalasbt/debian /" > /etc/apt/sources.list.d/sbt_old.list \
+ && curl -fsSL "https://keyserver.ubuntu.com/pks/lookup?op=get&search=0x2EE0EA64E40A89B84B2DF73499E82A75642AC823" \
+    | gpg --no-default-keyring --keyring gnupg-ring:/etc/apt/trusted.gpg.d/scalasbt-release.gpg --import \
+ && chmod 644 /etc/apt/trusted.gpg.d/scalasbt-release.gpg \
+ && apt-get update && apt-get install -y sbt
+
+# ----- flexpret build -----
+WORKDIR /home/flexpret
+RUN sbt test
+
+# Top-level build
+RUN source /home/flexpret/env.bash \
+ && cmake -B build \
+ && cmake --build build --target all install
+
+# SDK build: avoid executable try-compile (bare-metal cross)
+WORKDIR /home/flexpret/sdk
+RUN source /home/flexpret/env.bash \
+ && cmake -B build -DCMAKE_TRY_COMPILE_TARGET_TYPE=STATIC_LIBRARY \
+ && cmake --build build
+# If your SDK tests try to run host binaries, keep ctest disabled in Docker
+# RUN cd /home/flexpret/sdk/build && ctest --output-on-failure
+
+# Convenience env
+RUN echo 'export PATH="$PATH:/home/flexpret/build/emulator"' >> /root/.bashrc \
+ && echo 'source /home/flexpret/env.bash' >> /root/.bashrc
+
+# ----- mbed -----
+WORKDIR /home/mbed
+RUN python3 -m venv .venv && source .venv/bin/activate && pip install mbed-tools
+RUN apt-get install -y gcc-arm-none-eabi
+
+# ----- default -----
+WORKDIR /home
