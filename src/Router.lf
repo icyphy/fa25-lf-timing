@@ -1,0 +1,482 @@
+/**
+ * Federated Peer-to-Peer Router Network in Lingua Franca
+ * =======================================================
+ *
+ * A federated packet-switched network demonstrating peer-to-peer communication:
+ * - 6 nodes (sources) that both send and receive packets
+ * - 2 routers running as separate federates (processes)
+ * - Each node can communicate with any other node through the routers
+ * - Buffer management and congestion simulation
+ * - Multiple packet dropping scenarios
+ * - Network communication between federates with delays
+ * - Realistic traffic patterns with invalid destination addresses
+ *
+ * Network Topology:
+ * -----------------
+ *
+ *   Federate 0:                    Federate 1:
+ *   ┌──────────────────┐           ┌──────────────────┐
+ *   │ Source0 ←─┐      │           │      ┌─→ Source3 │
+ *   │ Source1 ←─┼─→ R0 │<────15ms──│──→ R1 ←─ Source4 │
+ *   │ Source2 ←─┘      │  network  │      └─→ Source5 │
+ *   └──────────────────┘   delay   └──────────────────┘
+ *
+ * (Sources act as both senders and receivers - bidirectional arrows)
+ *
+ * Federated Execution:
+ * --------------------
+ * - **Router0 federate**: Manages Sources 0, 1, 2 (nodes 0-2)
+ * - **Router1 federate**: Manages Sources 3, 4, 5 (nodes 3-5)
+ * - Inter-federate communication happens over network (simulated with 1ms delay)
+ * - Each federate can run on a different machine or same machine
+ * - Decentralized coordination mode allows independent execution
+ *
+ * Traffic Patterns:
+ * -----------------
+ * - Sources 0, 1, 2 connect to Router 0
+ * - Sources 3, 4, 5 connect to Router 1
+ * - Router 0 serves Sources 0-2 locally (delivers packets to them)
+ * - Router 1 serves Sources 3-5 locally (delivers packets to them)
+ * - Packets destined for sources on the other router are forwarded
+ * - Each source randomly selects any other source (0-5, excluding self) as destination
+ * - This creates true peer-to-peer communication where any node can talk to any other node
+ *
+ * Timing Configuration:
+ * ---------------------
+ * - **Sources**: Send packets every 500ms ±150ms (randomized, range: 350-650ms)
+ * - **Routers**: Process buffer every 200ms ±100ms (randomized, range: 100-300ms)
+ * - **Inter-router delay**: 15ms (simulated physical network delay)
+ * - Sources are slower than routers, but buffer size limits cause congestion
+ *
+ * Packet Dropping Scenarios:
+ * ---------------------------
+ * 1. **Buffer Overflow**: When buffer reaches MAX_BUFFER_SIZE (5 packets), new packets are dropped
+ * 2. **Invalid Destination**: Sources occasionally (~5%) generate invalid destination addresses
+ *    - Invalid addresses include: negative numbers (-1, -2), out-of-range (2, 3, 99)
+ *    - Routers immediately drop packets with invalid destinations
+ *
+ * Configuration:
+ * --------------
+ * - MAX_BUFFER_SIZE: 5 packets per router
+ * - NUM_DESTINATIONS: 2 (Dest 0 and Dest 1)
+ * - Timeout: 10 seconds
+ * - Coordination: Decentralized (no central coordinator, STP-based)
+ *
+ * @author Jack
+ */
+target C {
+  timeout: 10 sec,
+  coordination: decentralized
+}
+
+// Packet structure definition
+preamble {=
+  #include <stdlib.h>
+  #include <time.h>
+
+  #define MAX_BUFFER_SIZE 5
+  #define NUM_SOURCES 6  // Total number of sources (which also act as destinations)
+
+  typedef struct {
+    int src_addr;      // Source address (which source sent this)
+    int dest_addr;     // Destination address (which source should receive this)
+    int payload;       // Packet payload
+    int hop_count;     // Number of hops taken
+  } packet_t;
+
+  // Simple packet buffer/queue
+  typedef struct {
+    packet_t packets[MAX_BUFFER_SIZE];
+    int count;
+  } packet_buffer_t;
+
+  // Random number generator helpers
+  // Returns a random value in range [min, max]
+  static inline int random_range(int min, int max) {
+    return min + (rand() % (max - min + 1));
+  }
+
+  // Returns a random interval with variance around a base value
+  // Ensures the result is always positive (at least 1ms minimum)
+  static inline interval_t random_interval(int64_t base_ns, int64_t variance_ns) {
+    int64_t offset = random_range(-variance_ns, variance_ns);
+    int64_t result = base_ns + offset;
+    // Ensure minimum delay of 1ms to avoid negative scheduling issues
+    if (result < MSEC(1)) {
+      result = MSEC(1);
+    }
+    return result;
+  }
+=}
+
+/**
+ * PacketSource - Node that both sends and receives packets
+ * Acts as both a source and destination in a peer-to-peer network
+ *
+ * Each source randomly selects another source as the destination for each packet,
+ * creating a realistic peer-to-peer communication pattern where any node can
+ * communicate with any other node through the router network.
+ *
+ * Parameters:
+ * - source_id: Unique identifier for this source/node
+ * - bank_index: Index used for addressing and seeding random number generator
+ * - period: Average time between packet transmissions (default: 250ms)
+ * - variance: Random variance around the period (default: ±75ms)
+ * - invalid_dest_prob: Probability (0-100) of generating invalid destination (default: 5%)
+ */
+reactor PacketSource(
+    source_id: int = 0,
+    bank_index: int = 0,
+    period: time = 500 msec,
+    variance: time = 150 msec,
+    invalid_dest_prob: int = 5
+) {
+  output out: packet_t
+  input in: packet_t  // Receive packets destined for this source
+
+  logical action send_packet
+  state packet_count: int = 0
+  state packets_received: int = 0
+
+  reaction(startup) -> send_packet {=
+    // Seed random number generator with unique seed per source
+    srand(time(NULL) + self->bank_index * 100);
+
+    // Schedule first packet with randomized delay
+    interval_t delay = random_interval(self->period, self->variance);
+    lf_schedule(send_packet, delay);
+  =}
+
+  reaction(send_packet) -> out, send_packet {=
+    packet_t packet;
+    packet.src_addr = self->bank_index;
+
+    // Determine destination with possibility of invalid address
+    int random_chance = rand() % 100;
+    if (random_chance < self->invalid_dest_prob) {
+      // Generate invalid destination (outside valid range)
+      // Use negative numbers or numbers >= NUM_SOURCES
+      int invalid_options[] = {-1, -2, NUM_SOURCES, NUM_SOURCES + 1, 99};
+      packet.dest_addr = invalid_options[rand() % 5];
+      lf_print("[Source %d] Sending packet #%d → INVALID Source %d (intentional error)",
+              self->bank_index, packet.payload, packet.dest_addr);
+    } else {
+      // Randomly select any other source as destination (excluding self)
+      do {
+        packet.dest_addr = rand() % NUM_SOURCES;
+      } while (packet.dest_addr == self->bank_index);  // Don't send to self
+
+      lf_print("[Source %d] Sending packet #%d → Source %d",
+              self->bank_index, packet.payload, packet.dest_addr);
+    }
+
+    packet.payload = self->packet_count;
+    packet.hop_count = 0;
+
+    lf_set(out, packet);
+    self->packet_count++;
+
+    // Schedule next packet with randomized interval
+    interval_t next_delay = random_interval(self->period, self->variance);
+    lf_schedule(send_packet, next_delay);
+  =}
+
+  // Receive packets destined for this source
+  reaction(in) {=
+    if (in->is_present) {
+      packet_t packet = in->value;
+      self->packets_received++;
+
+      lf_print("[Source %d] ✓ Received packet from Source %d "
+               "(payload=%d, hops=%d, total received=%d)",
+               self->bank_index, packet.src_addr, packet.payload,
+               packet.hop_count, self->packets_received);
+    }
+  =}
+
+  reaction(shutdown) {=
+    lf_print("[Source %d] Total packets received: %d",
+             self->bank_index, self->packets_received);
+  =}
+}
+
+
+/**
+ * PacketRouter - Routes packets with buffer management and dropping policies
+ *
+ * Each router:
+ * - Serves 3 local sources (which act as both senders and receivers)
+ * - Forwards packets to the other router for non-local sources
+ * - Maintains a finite buffer for incoming packets
+ * - Processes buffer at randomized intervals to simulate realistic processing delays
+ *
+ * Packet Dropping Scenarios:
+ * ---------------------------
+ * 1. **Buffer Overflow**: When buffer is full (MAX_BUFFER_SIZE packets), new packets are dropped
+ * 2. **Invalid Destination**: Packets with destination address outside valid range [0, NUM_SOURCES-1]
+ *
+ * Parameters:
+ * - router_id: Unique identifier for this router (0 or 1)
+ * - first_source: First source ID this router serves (0 for Router0, 3 for Router1)
+ * - process_period: Average time between buffer processing events (default: 200ms)
+ * - process_variance: Random variance around processing period (default: ±100ms)
+ */
+reactor PacketRouter(
+    router_id: int = 0,
+    first_source: int = 0,       // First source ID this router serves
+    process_period: time = 200 msec,
+    process_variance: time = 100 msec
+) {
+  // Inputs from sources and other router
+  input[3] in: packet_t
+  input from_other: packet_t  // From the other router
+
+  // Outputs to local sources and other router
+  output[3] to_sources: packet_t  // Outputs to local 3 sources
+  output to_other: packet_t  // To the other router
+
+  // Statistics
+  state packets_routed: int = 0      // Delivered to local destination
+  state packets_forwarded: int = 0   // Forwarded to another router
+  state dropped_buffer: int = 0      // Dropped due to buffer overflow
+  state dropped_invalid: int = 0     // Dropped due to invalid destination
+
+  // Simple buffer for congestion simulation
+  state buffer: packet_buffer_t = {{{0}}, 0}
+  logical action process_buffer  // Process buffer with randomized timing
+
+  // Initialize randomized processing
+  reaction(startup) -> process_buffer {=
+    // Seed random number generator with router-specific seed
+    srand(time(NULL) + self->router_id * 1000);
+
+    // Schedule first buffer processing with randomized delay
+    interval_t delay = random_interval(self->process_period, self->process_variance);
+    lf_schedule(process_buffer, delay);
+  =}
+
+  // React to incoming packets from sources
+  reaction(in) -> to_sources, to_other {=
+    for (int i = 0; i < in_width; i++) {
+      if (in[i]->is_present) {
+        packet_t packet = in[i]->value;
+        packet.hop_count++;
+
+        lf_print("[Router %d] Received packet from Source %d → Source %d (hops=%d)",
+                 self->router_id, packet.src_addr, packet.dest_addr, packet.hop_count);
+
+        // Check if destination is valid
+        if (packet.dest_addr < 0 || packet.dest_addr >= NUM_SOURCES) {
+          lf_print("[Router %d] ✗ DROPPED: Invalid destination %d (src=%d, payload=%d)",
+                   self->router_id, packet.dest_addr, packet.src_addr, packet.payload);
+          self->dropped_invalid++;
+          continue;
+        }
+
+        // Check if this router serves the destination (sources 0-2 for Router0, 3-5 for Router1)
+        int dest_source = packet.dest_addr;
+        bool is_local = (dest_source >= self->first_source && dest_source < self->first_source + 3);
+
+        if (is_local) {
+          // Add to buffer instead of direct delivery (simulate congestion)
+          if (self->buffer.count < MAX_BUFFER_SIZE) {
+            self->buffer.packets[self->buffer.count++] = packet;
+            lf_print("[Router %d] Buffered packet for local Source %d (buffer: %d/%d)",
+                     self->router_id, packet.dest_addr, self->buffer.count, MAX_BUFFER_SIZE);
+          } else {
+            lf_print("[Router %d] ✗ DROPPED: Buffer overflow (src=%d, dest=%d, payload=%d)",
+                     self->router_id, packet.src_addr, packet.dest_addr, packet.payload);
+            self->dropped_buffer++;
+          }
+        } else {
+          // Forward to the other router
+          lf_print("[Router %d] Forwarding to other router (dest=%d)",
+                   self->router_id, packet.dest_addr);
+          lf_set(to_other, packet);
+          self->packets_forwarded++;
+        }
+      }
+    }
+  =}
+
+  // React to packets from other router
+  reaction(from_other) -> to_sources {=
+    if (from_other->is_present) {
+      packet_t packet = from_other->value;
+      packet.hop_count++;
+
+      lf_print("[Router %d] Received forwarded packet (dest=%d, hops=%d)",
+               self->router_id, packet.dest_addr, packet.hop_count);
+
+      // Check if this packet is for one of our local sources
+      int dest_source = packet.dest_addr;
+      bool is_local = (dest_source >= self->first_source && dest_source < self->first_source + 3);
+
+      if (is_local) {
+        // This packet is for our local source
+        if (self->buffer.count < MAX_BUFFER_SIZE) {
+          self->buffer.packets[self->buffer.count++] = packet;
+          lf_print("[Router %d] Buffered forwarded packet (buffer: %d/%d)",
+                   self->router_id, self->buffer.count, MAX_BUFFER_SIZE);
+        } else {
+          lf_print("[Router %d] ✗ DROPPED: Buffer overflow on forwarded packet",
+                   self->router_id);
+          self->dropped_buffer++;
+        }
+      } else {
+        // Packet arrived at wrong router (shouldn't happen with 2 routers)
+        lf_print("[Router %d] ✗ DROPPED: Wrong router for dest %d",
+                 self->router_id, packet.dest_addr);
+        self->dropped_invalid++;
+      }
+    }
+  =}
+
+  // Process buffered packets with randomized timing (simulates variable processing)
+  reaction(process_buffer) -> to_sources, process_buffer {=
+    if (self->buffer.count > 0) {
+      // Process one packet from buffer
+      packet_t packet = self->buffer.packets[0];
+
+      // Calculate which local source port to deliver to (0-2 index)
+      int local_index = packet.dest_addr - self->first_source;
+
+      lf_print("[Router %d] → Delivering packet to Source %d from buffer (remaining: %d)",
+               self->router_id, packet.dest_addr, self->buffer.count - 1);
+
+      lf_set(to_sources[local_index], packet);
+      self->packets_routed++;
+
+      // Shift buffer
+      for (int i = 0; i < self->buffer.count - 1; i++) {
+        self->buffer.packets[i] = self->buffer.packets[i + 1];
+      }
+      self->buffer.count--;
+    }
+
+    // Schedule next processing with randomized interval
+    interval_t next_delay = random_interval(self->process_period, self->process_variance);
+    lf_schedule(process_buffer, next_delay);
+  =}
+
+  reaction(shutdown) {=
+    // Add a small physical delay for Router 1 to ensure sequential output
+    if (self->router_id == 1) {
+      lf_sleep(MSEC(20));  // 20ms delay for Router 1
+    }
+
+    lf_print("\n[Router %d] === STATISTICS ===", self->router_id);
+    lf_print("[Router %d]   Routed:            %d", self->router_id, self->packets_routed);
+    lf_print("[Router %d]   Forwarded:         %d", self->router_id, self->packets_forwarded);
+    lf_print("[Router %d]   Dropped (Buffer):  %d", self->router_id, self->dropped_buffer);
+    lf_print("[Router %d]   Dropped (Invalid): %d", self->router_id, self->dropped_invalid);
+    lf_print("[Router %d]   Buffer remaining:  %d", self->router_id, self->buffer.count);
+    lf_print("[Router %d]   Total dropped:     %d\n",
+             self->router_id,
+             self->dropped_buffer + self->dropped_invalid);
+  =}
+}
+
+/**
+ * Router0Federate - First router federate with sources 0-2
+ * Each source acts as both sender and receiver
+ */
+reactor Router0Federate {
+  // Ports for inter-federate communication
+  input from_router1: packet_t
+  output to_router1: packet_t
+
+  // Create sources for this federate (sources 0, 1, 2)
+  source0 = new PacketSource(source_id=0, bank_index=0)
+  source1 = new PacketSource(source_id=1, bank_index=1)
+  source2 = new PacketSource(source_id=2, bank_index=2)
+
+  // Create router serving sources 0-2
+  router = new PacketRouter(
+    router_id=0,
+    first_source=0
+  )
+
+  // Connect sources to router (sending packets)
+  source0.out, source1.out, source2.out -> router.in
+
+  // Connect router back to sources (receiving packets)
+  router.to_sources -> source0.in, source1.in, source2.in
+
+  // Connect to/from other federate
+  router.to_other -> to_router1
+  from_router1 -> router.from_other
+}
+
+/**
+ * Router1Federate - Second router federate with sources 3-5
+ * Each source acts as both sender and receiver
+ */
+reactor Router1Federate {
+  // Ports for inter-federate communication
+  input from_router0: packet_t
+  output to_router0: packet_t
+
+  // Create sources for this federate (sources 3, 4, 5)
+  source3 = new PacketSource(source_id=3, bank_index=3)
+  source4 = new PacketSource(source_id=4, bank_index=4)
+  source5 = new PacketSource(source_id=5, bank_index=5)
+
+  // Create router serving sources 3-5
+  router = new PacketRouter(
+    router_id=1,
+    first_source=3
+  )
+
+  // Connect sources to router (sending packets)
+  source3.out, source4.out, source5.out -> router.in
+
+  // Connect router back to sources (receiving packets)
+  router.to_sources -> source3.in, source4.in, source5.in
+
+  // Connect to/from other federate
+  router.to_other -> to_router0
+  from_router0 -> router.from_other
+}
+
+/**
+ * Main reactor - Federated 2-router network
+ *
+ * Creates a distributed network with two federates, each running independently
+ * and communicating over network connections with simulated delays.
+ *
+ * Network Topology:
+ *
+ *   Federate 0:                    Federate 1:
+ *   ┌──────────────────┐           ┌──────────────────┐
+ *   │ Source0 ──┐      │           │      ┌── Source3 │
+ *   │ Source1 ──┼──> R0│<────15ms──│──> R1 ── Source4 │
+ *   │ Source2 ──┘      │  network  │      └── Source5 │  
+ *   └──────────────────┘   delay   └──────────────────┘
+ *
+ * Execution Model:
+ * ----------------
+ * - Each federate runs as a separate process
+ * - Federates communicate over network/localhost sockets
+ * - Can be distributed across multiple machines (requires RTI configuration)
+ * - Decentralized coordination: no central coordinator needed at runtime
+ * - 1ms network delay simulates realistic inter-router communication
+ *
+ * Performance Characteristics:
+ * ---------------------------
+ * - Sources generate packets every ~250ms (with randomization)
+ * - Routers process buffer every ~100ms (faster than packet arrival)
+ * - Congestion occurs due to buffer size limits (MAX=5), not processing speed
+ * - Invalid destination packets (~5%) get dropped immediately
+ */
+federated reactor {
+  fed0 = new Router0Federate()
+  fed1 = new Router1Federate()
+
+  // Inter-federate connections with network delays
+  // These connections establish logical message passing between federates
+  // with 1ms simulated network latency
+  fed0.to_router1 -> fed1.from_router0 after 15 msec
+  fed1.to_router0 -> fed0.from_router1 after 15 msec
+}
+
