@@ -1,0 +1,121 @@
+target uC {
+  platform: Zephyr,
+}
+
+preamble {=
+    #include <stdlib.h>
+    #include <time.h>
+
+    typedef struct {
+        int id;
+        int seq;
+        int flags;
+        /*
+        0 = SYN
+        1 = ACK
+        2 = FIN
+        */
+    } packet;
+
+    static inline int randint(int a, int b) {
+        return (rand() % (b - a + 1)) + a;
+    }
+=}
+
+reactor Client(period: time = 1 sec) {
+    timer t(0, period)
+    state id: int = 0
+
+    input inp: packet
+    output outp: packet
+    
+    reaction(startup) {=
+        srand(time(NULL));
+    =}
+
+    reaction(t) -> outp {=
+        packet *p = malloc(sizeof(packet));
+        p->id = self->id++;
+        p->seq = 0;
+        p->flags = 1; // SYN
+        lf_set(outp, *p);
+    =}
+
+    reaction(inp) -> outp {=
+        packet *in = &inp->value;
+        packet *out = malloc(sizeof(packet));
+        out->id = in->id;
+        out->seq = in->seq + 1;
+
+        bool send = true;
+        lf_print("(%lld, %d) [CLIENT] Received packet id=%d seq=%d",
+            lf_time_logical_elapsed(), lf_tag().microstep, in->id, in->seq);
+        switch (in->flags) {
+            case 3: // SYN-ACK
+                lf_print("[CLIENT] Received SYN-ACK", lf_time_logical_elapsed(), lf_tag().microstep);
+                out->flags = 2; // ACK
+                break;
+        }
+
+        lf_sleep(MSEC(randint(40, 60))); // simulate processing + connection delay
+        if (send)
+            lf_set(outp, *out);
+    =}
+}
+
+reactor Server(STA: time = 100 msec, refresh: time = 20 msec) {
+    input inp: packet
+    output outp: packet
+
+    timer t(0, refresh)
+
+    reaction(inp) -> outp {=
+        packet *in = &inp->value;
+        packet *out = malloc(sizeof(packet));
+        out->id = in->id;
+        out->seq = in->seq + 1;
+
+        bool send = true;
+        lf_print("(%lld, %d) [SERVER] Received packet id=%d seq=%d",
+            lf_time_logical_elapsed(), lf_tag().microstep, in->id, in->seq);
+        switch (in->flags) {
+            case 1: // SYN
+                lf_print("[SERVER] Received SYN", lf_time_logical_elapsed(), lf_tag().microstep);
+                out->flags = 3; // SYN-ACK
+                break;    
+            case 2: // ACK
+                lf_print("[SERVER] Received ACK", lf_time_logical_elapsed(), lf_tag().microstep);
+                send = false;
+                break;
+        }
+
+        lf_sleep(MSEC(randint(10, 250))); // simulate processing + connection delay
+        if (send)
+            lf_set(outp, *out);
+    =} deadline(150 msec) {=
+        lf_print("(%lld, %d) [SERVER] Deadline violation...",
+            lf_time_logical_elapsed(), lf_tag().microstep);
+    =} 
+
+    reaction(t, inp) {=
+        // refresh --> triggers network bandwidth overload
+    =}
+}
+
+federated reactor TCP {
+    @interface_tcp(name="server_if", address="192.168.1.100")
+    @platform_zephyr
+    s = new Server()
+
+    @interface_tcp(name="client_if", address="192.168.1.101")
+    @platform_zephyr
+    c = new Client()
+
+    @link(left="server_if", right="client_if", server_side="left", server_port=1024)
+    @maxwait(200 ms)
+    s.outp -> c.inp after 100 msec
+
+    @link(left="client_if", right="server_if", server_side="right", server_port=1024)
+    @maxwait(200 ms)
+    c.outp -> s.inp after 100 msec
+}
