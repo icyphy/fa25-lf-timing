@@ -1,3 +1,7 @@
 [submodule "lingua-franca"]
 	path = lingua-franca
 	url = git@github.com:lf-lang/lingua-franca.git
+[submodule "gametime"]
+	path = gametime
+	url = git@github.com:icyphy/gametime.git
+	branch = lf-support

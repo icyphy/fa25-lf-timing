@@ -1,0 +1,75 @@
+/**
+ * HelloWorld program with multiple execution paths for GameTime analysis
+ * This creates conditional branches to explore different WCET scenarios
+ */
+
+target C {
+    timeout: 10 sec
+}
+
+reactor Counter(stride:int = 1) {
+    timer t(0 msec, 1 sec)
+
+    state count: int = 0
+    state even_count: int = 0
+    state odd_count: int = 0
+    output out:int
+    
+    reaction(t) -> out {=
+        // Multiple execution paths based on count value
+        if (self->count % 2 == 0) {
+            // Even path - more complex computation
+            self->even_count++;
+            for (int i = 0; i < 3; i++) {
+                self->even_count += i;
+            }
+            lf_set(out, self->count * 2);
+        } else {
+            // Odd path - different computation
+            self->odd_count++;
+            if (self->count > 5) {
+                // Nested conditional for more paths
+                lf_set(out, self->count * 3);
+            } else {
+                lf_set(out, self->count + 10);
+            }
+        }
+        self->count += self->stride;
+    =}
+}
+
+reactor Printer {
+    input in: int
+    state message_count: int = 0
+    
+    reaction(in) {=
+        self->message_count++;
+        
+        // Multiple execution paths in printer too
+        if (in->value < 10) {
+            // Short message path
+            lf_print("Small: %d", in->value);
+        } else if (in->value < 50) {
+            // Medium message path
+            lf_print("Medium: %d at time %lld", in->value, lf_time_logical());
+        } else {
+            // Large message path with more computation
+            int temp = in->value;
+            for (int i = 0; i < 2; i++) {
+                temp += i;
+            }
+            lf_print("Large: %d (processed: %d) at time %lld", 
+                     in->value, temp, lf_time_logical());
+        }
+        
+        // Additional conditional path
+        if (self->message_count > 3) {
+            lf_print("High activity detected!");
+        }
+    =}
+}
+main reactor {
+    c = new Counter();
+    p = new Printer();
+    c.out -> p.in;
+}
