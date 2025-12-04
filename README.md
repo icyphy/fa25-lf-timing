@@ -24,8 +24,9 @@ docker exec -it gametime-work bash
 ```
 source /home/gametime/.venv/bin/activate && export PYTHONPATH=/home/gametime/src:$PYTHONPATH
 ```
-7. ```docker exec gametime-work bash -c "cd /home/gametime && clang++-16 -shared -fPIC src/custom_passes/custom_inline_pass.cpp -o src/custom_passes/custom_inline_pass.so \$(llvm-config --cxxflags --ldflags --libs) -Wl,-rpath,\$(llvm-config --libdir)"
-
+7. 
+```
+docker exec gametime-work bash -c "cd /home/gametime && clang++-16 -shared -fPIC src/custom_passes/custom_inline_pass.cpp -o src/custom_passes/custom_inline_pass.so \$(llvm-config --cxxflags --ldflags --libs) -Wl,-rpath,\$(llvm-config --libdir)"
 ```
 
 7. `cd /home/gametime/test/tacle_test`
