@@ -1,0 +1,1270 @@
+/**
+ * Realistic Distributed Data Processing System in Lingua Franca
+ * ==============================================================
+ *
+ * Host-side federated file for the MapReduce split deployment. Runs on the
+ * PC (microC platform Native) and contains Master, Router, and Reducer. Exposes
+ * worker-facing ports (stage1 tasks/results and cross-dependency results) that
+ * should be linked to two Zephyr boards running MapReduceWorker.lf (worker_id 1
+ * and 2). Use @link/@interface_tcp (or your transport) to bind the exposed ports.
+ *
+ * Simulates a real-world distributed computing framework similar to MapReduce, Spark,
+ * or cloud-based data processing pipelines. This system demonstrates:
+ * - Job submission and task distribution
+ * - Three distinct processing patterns (single-node, sequential, parallel)
+ * - Parallel data processing across multiple worker nodes
+ * - Result aggregation and coordination
+ * - Realistic network latencies and processing times
+ * - Task failure handling and retry mechanisms
+ * - Load monitoring and statistics
+ *
+ * Processing Patterns Supported:
+ * -------------------------------
+ * 1. SINGLE_NODE: Task processed by one worker only (no cross-dependency)
+ *    - Example: Simple log parsing, independent data transformations
+ *    - Flow: Master → Router → Worker → Router → Reducer
+ *
+ * 2. SEQUENTIAL: Task processed in pipeline (one worker then the other)
+ *    - Example: Transform data, then aggregate results
+ *    - Flow: Master → Router → Worker1 → Router → Worker2 → Router → Reducer
+ *
+ * 3. PARALLEL_CROSS: Two-stage parallel with cross-dependency (original pattern)
+ *    - Example: Cross-region correlation analysis
+ *    - Flow: Both workers process Stage 1 in parallel, exchange results,
+ *            then both complete Stage 2 using peer's Stage 1 data
+ *
+ * System Architecture (Multi-Pattern with Router):
+ * -----------------------------------------------
+ *
+ *                     Master Node (Federate 0):
+ *                   ┌──────────────────────────┐
+ *                   │  Client + Scheduler      │
+ *                   │  - Submits data batches  │
+ *                   │  - Generates workload    │
+ *                   │  - Splits into 2 stages  │
+ *                   │  - Distributes workload  │
+ *                   └──────────┬───────────────┘
+ *                              │
+ *                              ▼
+ *                     Router Node (Federate 1):
+ *                   ┌──────────────────────────┐
+ *                   │  Message Router          │
+ *                   │  - Routes all messages   │
+ *                   │  - Prevents loops        │
+ *                   │  - Stage validation      │
+ *                   └────┬──────────────┬──────┘
+ *                        │              │
+ *           ┌────────────┘              └────────────┐
+ *           │                                        │
+ *           ▼                                        ▼
+ *    Worker Node 1 (Fed 2)              Worker Node 2 (Fed 3)
+ *  ┌─────────────────────┐            ┌─────────────────────┐
+ *  │ Stage 1: Process    │            │ Stage 1: Process    │
+ *  │   1st half [0-50%]  │            │   1st half [50-100%]│
+ *  │   ↓ (via Router)    │            │   ↓ (via Router)    │
+ *  │ Stage 2: Process    │            │ Stage 2: Process    │
+ *  │   2nd half + peer's │            │   2nd half + peer's │
+ *  │   Stage 1 output    │            │   Stage 1 output    │
+ *  └──────────┬──────────┘            └──────────┬──────────┘
+ *             │                                    │
+ *             └──────────────┬─────────────────────┘
+ *                            │ (via Router)
+ *                            ▼
+ *                  Reducer Node (Federate 4):
+ *                ┌──────────────────────────┐
+ *                │  ResultAggregator        │
+ *                │  - Collects Stage 2      │
+ *                │  - Performs reduce phase │
+ *                │  - Generates reports     │
+ *                └──────────────────────────┘
+ *
+ * Realistic Details:
+ * ------------------
+ * 1. **Job Characteristics**:
+ *    - Jobs process batches of 100-1000 records
+ *    - Three processing patterns: SINGLE_NODE (33%), SEQUENTIAL (33%), PARALLEL_CROSS (33%)
+ *    - Jobs arrive every 2-3 seconds (bursty traffic)
+ *    - Dynamic load balancing based on data size and pattern
+ *
+ * 2. **Network Latency (all via Router)**:
+ *    - Master → Router: 5ms (same datacenter)
+ *    - Router → Worker 1: 8ms (same datacenter)
+ *    - Router → Worker 2: 15ms (cross-region)
+ *    - Router → Reducer: 8ms
+ *    - Worker ↔ Worker: via Router (no direct P2P)
+ *
+ * 3. **Processing Pattern Details**:
+ *
+ *    SINGLE_NODE (33% of jobs):
+ *    - Task assigned to one worker only
+ *    - Direct processing: Worker → Router → Reducer
+ *    - Example: simple_parse jobs
+ *
+ *    SEQUENTIAL (33% of jobs):
+ *    - Two-stage pipeline: Worker A → Worker B
+ *    - Stage 1 output becomes Stage 2 input
+ *    - Example: transform_aggregate jobs (transform then aggregate)
+ *
+ *    PARALLEL_CROSS (33% of jobs):
+ *    - Stage 1: Each worker processes their first partition
+ *      - Worker 1: Records [0-25%]
+ *      - Worker 2: Records [50-75%]
+ *      - Stage 1 results sent via Router to peer
+ *    - Stage 2: Each worker processes second partition + peer's Stage 1 output
+ *      - Worker 1: Processes [25-50%] using Worker 2's Stage 1 data
+ *      - Worker 2: Processes [75-100%] using Worker 1's Stage 1 data
+ *      - Creates cross-dependency, prevents loops
+ *    - Both Stage 2 results sent to Reducer
+ *    - Example: cross_region_analysis jobs
+ *
+ * 4. **Processing Characteristics**:
+ *    - CPU-bound tasks: 100-400ms per stage
+ *    - Variable load based on data size
+ *    - 5% task failure rate (simulated)
+ *    - Automatic retry on failure
+ *
+ * 5. **Resource Monitoring**:
+ *    - Track throughput (tasks/second)
+ *    - Monitor processing latency per stage and pattern
+ *    - Count failures and retries
+ *    - Calculate success rate per pattern
+ *    - Measure parallelization efficiency (for PARALLEL_CROSS jobs)
+ *
+ * 6. **Realistic Use Cases by Pattern**:
+ *
+ *    SINGLE_NODE:
+ *    - Simple log parsing for individual data centers
+ *    - Product catalog updates for specific regions
+ *    - Independent data validations and cleanups
+ *
+ *    SEQUENTIAL:
+ *    - ETL pipelines: Extract → Transform → Load
+ *    - Order processing: Validate → Calculate shipping
+ *    - Data enrichment: Parse → Enrich with metadata
+ *
+ *    PARALLEL_CROSS:
+ *    - Cross-region analytics requiring data correlation
+ *    - Fraud detection across multiple payment processors
+ *    - Session analysis spanning multiple data centers
+ *    - Distributed joins requiring data from both partitions
+ *
+ * Configuration:
+ * --------------
+ * - Coordination: Decentralized (no central RTI at runtime)
+ * - Timeout: 30 seconds (realistic job duration)
+ * - Job submission rate: 2-3 seconds
+ * - Failure rate: 5% (realistic distributed system)
+ *
+ * @author Jack
+ * Deployment: Master/Router/Reducer on host PC, Workers on two microcontrollers.
+ */
+target uC {
+  // Default to the host PC; worker federates override with @platform_zephyr.
+  platform: Native,
+  timeout: 30 sec,
+  coordination: decentralized
+}
+
+// Realistic data structures for distributed computing
+preamble {=
+  #include <stdlib.h>
+  #include <time.h>
+  #include <string.h>
+  #include <stdbool.h>
+
+  // Processing pattern types
+  typedef enum {
+    SINGLE_NODE,       // Process on single worker (no cross-dependency)
+    SEQUENTIAL,        // Process on one worker, then the other (pipeline)
+    PARALLEL_CROSS     // Both workers in parallel with cross-dependency
+  } processing_pattern_t;
+
+  // Job submitted by client
+  typedef struct {
+    int job_id;                    // Unique job identifier
+    int num_records;               // Number of records to process
+    int data_size_kb;              // Approximate data size in KB
+    char job_type[32];             // "log_analysis", "data_transform", etc.
+    long submission_time;          // When job was submitted (for latency tracking)
+    processing_pattern_t pattern;  // Processing pattern for this job
+    int target_worker;             // For SINGLE_NODE: which worker (1 or 2)
+  } job_t;
+
+  // Map task (partition of a job)
+  typedef struct {
+    int job_id;                    // Original job ID
+    int task_id;                   // Task identifier within job
+    int partition_start;           // Start index of data partition
+    int partition_end;             // End index of data partition
+    int data_size_kb;              // Size of this partition
+    char operation[32];            // Operation to perform
+    long submission_time;          // Job submission time
+    int retry_count;               // Number of retries (for failure handling)
+    int processing_stage;          // 1=stage1, 2=stage2 (prevents loops)
+    processing_pattern_t pattern;  // Processing pattern for this task
+    int target_worker;             // Target worker for this task
+    bool is_final_stage;           // True if this is the final stage (send to reducer)
+    int stage2_start;              // Explicit Stage 2 start (records)
+    int stage2_end;                // Explicit Stage 2 end (records)
+  } map_task_t;
+
+  // Map task result (intermediate or final)
+  typedef struct {
+    int job_id;                    // Original job ID
+    int task_id;                   // Task identifier
+    int records_processed;         // Number of records processed
+    long processing_time_ms;       // Actual processing time
+    int worker_id;                 // Which worker processed this
+    bool succeeded;                // Task success/failure
+    char error_msg[64];            // Error message if failed
+    long completion_time;          // Timestamp when completed
+    int processing_stage;          // 1=stage1 intermediate, 2=stage2 final
+    int intermediate_data;         // Intermediate result data to share
+    processing_pattern_t pattern;  // Processing pattern for this result
+    bool is_final_stage;           // True if this is the final stage (send to reducer)
+  } map_result_t;
+
+
+  // Final job result (after reduce/aggregation)
+  typedef struct {
+    int job_id;                    // Job identifier
+    int total_records;             // Total records processed
+    long total_time_ms;            // End-to-end latency
+    int num_retries;               // Number of task retries
+    bool succeeded;                // Overall job success
+  } job_result_t;
+
+  // Helper functions
+  static inline int random_range(int min, int max) {
+    return min + (rand() % (max - min + 1));
+  }
+
+  // Get current time in milliseconds
+  static inline long current_time_ms() {
+    // microC-friendly physical time in milliseconds.
+    return lf_time_physical() / MSEC(1);
+  }
+=}
+
+/**
+ * Client - Simulates clients submitting data processing jobs
+ *
+ * Represents real-world job submission patterns:
+ * - Variable job sizes (100-1000 records)
+ * - Different data sizes (10-500 KB)
+ * - Bursty arrival patterns
+ * - Multiple job types (log analysis, data transform, aggregation)
+ */
+reactor Client(
+    min_interval: time = 2 sec,
+    max_interval: time = 3 sec
+) {
+  output out: job_t
+  logical action submit_job
+  state job_counter: int = 0
+
+  reaction(startup) -> submit_job {=
+    srand(time(NULL));
+    lf_schedule(submit_job, 0);
+  =}
+
+  reaction(submit_job) -> out, submit_job {=
+    job_t job;
+    job.job_id = self->job_counter++;
+    job.num_records = random_range(100, 1000);
+    job.data_size_kb = random_range(50, 500);
+    job.submission_time = current_time_ms();
+
+    // Assign processing pattern (33% each type)
+    int pattern_type = rand() % 3;
+    const char* pattern_name;
+
+    if (pattern_type == 0) {
+      // Single node processing
+      job.pattern = SINGLE_NODE;
+      job.target_worker = (rand() % 2) + 1;  // Worker 1 or 2
+      snprintf(job.job_type, sizeof(job.job_type), "simple_parse");
+      pattern_name = "SINGLE_NODE";
+    } else if (pattern_type == 1) {
+      // Sequential pipeline
+      job.pattern = SEQUENTIAL;
+      job.target_worker = (rand() % 2) + 1;  // Start at Worker 1 or 2
+      snprintf(job.job_type, sizeof(job.job_type), "transform_aggregate");
+      pattern_name = "SEQUENTIAL";
+    } else {
+      // Parallel with cross-dependency
+      job.pattern = PARALLEL_CROSS;
+      job.target_worker = 0;  // Both workers
+      snprintf(job.job_type, sizeof(job.job_type), "cross_region_analysis");
+      pattern_name = "PARALLEL_CROSS";
+    }
+
+    lf_print("\n[Client] New Job #%d: %s [%s]", job.job_id, job.job_type, pattern_name);
+    lf_print("Records: %d | Data Size: %d KB", job.num_records, job.data_size_kb);
+    if (job.pattern == SINGLE_NODE) {
+      lf_print("Target: Worker %d only", job.target_worker);
+    } else if (job.pattern == SEQUENTIAL) {
+      int next_worker = (job.target_worker == 1) ? 2 : 1;
+      lf_print("Pipeline: Worker %d → Worker %d", job.target_worker, next_worker);
+    } else {
+      lf_print("Parallel: Both workers with cross-dependency");
+    }
+
+    lf_set(out, job);
+
+    // Schedule next job with variable interval (bursty traffic)
+    interval_t next = random_range(
+      self->min_interval / MSEC(1),
+      self->max_interval / MSEC(1)
+    ) * MSEC(1);
+    lf_schedule(submit_job, next);
+  =}
+
+  reaction(shutdown) {=
+    lf_print("\n[Client] Submitted %d jobs total", self->job_counter);
+  =}
+}
+
+/**
+ * Scheduler - Distributes jobs across worker nodes
+ *
+ * Simulates a master node/scheduler that:
+ * - Splits jobs into map tasks (2-way partitioning)
+ * - Distributes tasks to workers with load balancing
+ * - Implements intelligent data partitioning
+ * - Tracks job metadata and scheduling decisions
+ */
+reactor Scheduler {
+  input in: job_t
+  output to_worker1: map_task_t
+  output to_worker2: map_task_t
+
+  state jobs_scheduled: int = 0
+  state total_tasks: int = 0
+
+  reaction(in) -> to_worker1, to_worker2 {=
+    if (in->is_present) {
+      job_t job = in->value;
+
+      if (job.pattern == SINGLE_NODE) {
+        // Single worker processing - no cross-dependency
+        lf_print("[Scheduler] Job #%d (%s) - SINGLE_NODE on Worker %d",
+                 job.job_id, job.job_type, job.target_worker);
+        lf_print("[Scheduler]    %d records, %d KB → Worker %d only",
+                 job.num_records, job.data_size_kb, job.target_worker);
+
+        map_task_t task;
+        task.job_id = job.job_id;
+        task.task_id = job.target_worker;
+        task.partition_start = 0;
+        task.partition_end = job.num_records;
+        task.data_size_kb = job.data_size_kb;
+        task.submission_time = job.submission_time;
+        task.retry_count = 0;
+        task.processing_stage = 1;
+        task.pattern = SINGLE_NODE;
+        task.target_worker = job.target_worker;
+        task.is_final_stage = true;  // Goes directly to reducer
+        task.stage2_start = 0;
+        task.stage2_end = job.num_records;
+        snprintf(task.operation, sizeof(task.operation), "%s", job.job_type);
+
+        lf_print("[Scheduler]   → Task → Worker %d: all records [0-%d], %d KB",
+                 job.target_worker, job.num_records, job.data_size_kb);
+
+        if (job.target_worker == 1) {
+          lf_set(to_worker1, task);
+        } else {
+          lf_set(to_worker2, task);
+        }
+
+        self->jobs_scheduled++;
+        self->total_tasks += 1;
+
+      } else if (job.pattern == SEQUENTIAL) {
+        // Sequential pipeline: first worker → second worker
+        lf_print("[Scheduler] Job #%d (%s) - SEQUENTIAL Pipeline",
+                 job.job_id, job.job_type);
+        int next_worker = (job.target_worker == 1) ? 2 : 1;
+        lf_print("[Scheduler]    %d records, %d KB → Worker %d → Worker %d",
+                 job.num_records, job.data_size_kb, job.target_worker, next_worker);
+
+        // Create stage 1 task for first worker
+        map_task_t task1;
+        task1.job_id = job.job_id;
+        task1.task_id = job.target_worker;
+        task1.partition_start = 0;
+        task1.partition_end = job.num_records;
+        task1.data_size_kb = job.data_size_kb;
+        task1.submission_time = job.submission_time;
+        task1.retry_count = 0;
+        task1.processing_stage = 1;
+        task1.pattern = SEQUENTIAL;
+        task1.target_worker = next_worker;  // Next worker in pipeline
+        task1.is_final_stage = false;  // Not final, goes to peer
+        task1.stage2_start = 0;
+        task1.stage2_end = job.num_records;
+        snprintf(task1.operation, sizeof(task1.operation), "%s", job.job_type);
+
+        lf_print("[Scheduler]   → Stage 1 → Worker %d: records [0-%d], %d KB",
+                 job.target_worker, job.num_records, job.data_size_kb);
+        lf_print("[Scheduler]   → Stage 2 → Worker %d: process Stage 1 output",
+                 next_worker);
+
+        if (job.target_worker == 1) {
+          lf_set(to_worker1, task1);
+        } else {
+          lf_set(to_worker2, task1);
+        }
+
+        self->jobs_scheduled++;
+        self->total_tasks += 2;  // Two stages
+
+      } else {  // PARALLEL_CROSS
+        // Parallel with cross-dependency (original behavior)
+        lf_print("[Scheduler] Job #%d (%s) - PARALLEL_CROSS (Two-Stage)",
+                 job.job_id, job.job_type);
+        lf_print("[Scheduler]    %d records, %d KB → 2 workers (Stage 1)",
+                 job.num_records, job.data_size_kb);
+
+        // Split job into 2 Stage 1 tasks (first half for each worker)
+        int partition_size = job.num_records / 4;  // Each stage gets 1/4 of total
+        int data_per_task = job.data_size_kb / 4;
+
+        // Create Stage 1 task for Worker 1 (first quarter: 0-25%)
+        map_task_t task1;
+        task1.job_id = job.job_id;
+        task1.task_id = 1;
+        task1.partition_start = 0;
+        task1.partition_end = partition_size;
+        task1.data_size_kb = data_per_task;
+        task1.submission_time = job.submission_time;
+        task1.retry_count = 0;
+        task1.processing_stage = 1;  // Stage 1
+        task1.pattern = PARALLEL_CROSS;
+        task1.target_worker = 2;  // Result goes to Worker 2
+        task1.is_final_stage = false;
+        task1.stage2_start = partition_size;          // 25% mark
+        task1.stage2_end = partition_size * 2;        // 50% mark
+        snprintf(task1.operation, sizeof(task1.operation), "%s", job.job_type);
+
+        // Create Stage 1 task for Worker 2 (third quarter: 50-75%)
+        map_task_t task2;
+        task2.job_id = job.job_id;
+        task2.task_id = 2;
+        task2.partition_start = partition_size * 2;  // Start at 50%
+        task2.partition_end = partition_size * 3;    // End at 75%
+        task2.data_size_kb = data_per_task;
+        task2.submission_time = job.submission_time;
+        task2.retry_count = 0;
+        task2.processing_stage = 1;  // Stage 1
+        task2.pattern = PARALLEL_CROSS;
+        task2.target_worker = 1;  // Result goes to Worker 1
+        task2.is_final_stage = false;
+        task2.stage2_start = partition_size * 3;      // 75% mark
+        task2.stage2_end = job.num_records;           // 100% (captures remainder)
+        snprintf(task2.operation, sizeof(task2.operation), "%s", job.job_type);
+
+        lf_print("[Scheduler]   → Stage 1 Task 1 → Worker 1: records [%d-%d], %d KB (0-25%%)",
+                 task1.partition_start, task1.partition_end, task1.data_size_kb);
+        lf_print("[Scheduler]   → Stage 1 Task 2 → Worker 2: records [%d-%d], %d KB (50-75%%)",
+                 task2.partition_start, task2.partition_end, task2.data_size_kb);
+        lf_print("[Scheduler]   (Stage 2 will process remaining quarters with cross-dependency)");
+
+        // Dispatch Stage 1 tasks to workers
+        lf_set(to_worker1, task1);
+        lf_set(to_worker2, task2);
+
+        self->jobs_scheduled++;
+        self->total_tasks += 2;
+      }
+    }
+  =}
+
+  reaction(shutdown) {=
+    lf_print("\n[Scheduler] === STATISTICS ===");
+    lf_print("[Scheduler] Jobs scheduled: %d", self->jobs_scheduled);
+    lf_print("[Scheduler] Total tasks: %d", self->total_tasks);
+    lf_print("[Scheduler] Avg tasks per job: %.1f",
+             (double)self->total_tasks / self->jobs_scheduled);
+  =}
+}
+
+/**
+ * Worker - Two-stage worker node with cross-dependency processing
+ *
+ * Simulates a real worker machine with:
+ * - Stage 1: Process first partition (0-25% or 50-75% of total data)
+ * - Stage 2: Process second partition (25-50% or 75-100%) + peer's Stage 1 output
+ * - Cross-dependency: Must wait for peer's Stage 1 before starting Stage 2
+ * - CPU processing time proportional to data size
+ * - Task failure simulation (5% failure rate)
+ * - Resource monitoring
+ */
+reactor Worker(
+    worker_id: int = 1,
+    base_processing_time_ms: int = 100,
+    failure_rate: int = 5  // 5% failure rate
+) {
+  input stage1_task: map_task_t      // Stage 1 task from scheduler
+  input peer_stage1_result: map_result_t  // Peer's Stage 1 result for Stage 2
+  output stage1_result: map_result_t      // Stage 1 result to peer
+  output stage2_result: map_result_t      // Final Stage 2 result to reducer
+
+  state tasks_processed: int = 0
+  state tasks_failed: int = 0
+  state total_processing_time_ms: long = 0
+  state stage1_completed: int = 0
+  state stage2_completed: int = 0
+
+  // Storage for pending Stage 2 tasks (waiting for peer's Stage 1)
+  state pending_stage2_jobs: int[50]       // Job IDs waiting for Stage 2
+  state pending_stage2_count: int = 0
+  state my_stage1_results: map_result_t[50]  // My Stage 1 results for reference
+  state stage2_start: int[50]               // Explicit Stage 2 start per job
+  state stage2_end: int[50]                 // Explicit Stage 2 end per job
+
+  // Process Stage 1 task
+  reaction(stage1_task) -> stage1_result, stage2_result {=
+    if (stage1_task->is_present) {
+      map_task_t task = stage1_task->value;
+
+      const char* pattern_name = (task.pattern == SINGLE_NODE) ? "SINGLE_NODE" :
+                                 (task.pattern == SEQUENTIAL) ? "SEQUENTIAL" :
+                                 "PARALLEL_CROSS";
+
+      lf_print("[Worker %d] STAGE 1 - Received Job #%d [%s]",
+               self->worker_id, task.job_id, pattern_name);
+      lf_print("[Worker %d]     Operation: %s | Data: %d KB | Records: [%d-%d]",
+               self->worker_id, task.operation, task.data_size_kb,
+               task.partition_start, task.partition_end);
+
+      // Record Stage 2 bounds for this job (used when peer result arrives).
+      int job_slot = task.job_id % 50;
+      self->stage2_start[job_slot] = task.stage2_start;
+      self->stage2_end[job_slot] = task.stage2_end;
+
+      // Calculate processing time based on data size (realistic CPU-bound work)
+      int records = task.partition_end - task.partition_start;
+      long proc_time_ms = self->base_processing_time_ms +
+                          (task.data_size_kb * 0.5) +  // 0.5ms per KB
+                          random_range(-50, 100);       // variance
+
+      if (proc_time_ms < 50) proc_time_ms = 50;  // minimum 50ms
+
+      lf_print("[Worker %d]     Processing Stage 1... (estimated %ld ms)",
+               self->worker_id, proc_time_ms);
+
+      // Simulate processing time
+      lf_sleep(proc_time_ms * MSEC(1));
+
+      // Simulate random task failures (5% failure rate)
+      bool task_failed = (rand() % 100) < self->failure_rate;
+
+      // Create Stage 1 result
+      map_result_t result;
+      result.job_id = task.job_id;
+      result.task_id = task.task_id;
+      result.worker_id = self->worker_id;
+      result.processing_time_ms = proc_time_ms;
+      result.completion_time = current_time_ms();
+      result.processing_stage = 1;  // Stage 1
+      result.pattern = task.pattern;
+      result.is_final_stage = task.is_final_stage;
+
+      if (task_failed && task.retry_count == 0) {
+        // Task failed (simulated)
+        result.succeeded = false;
+        result.records_processed = 0;
+        result.intermediate_data = 0;
+        snprintf(result.error_msg, sizeof(result.error_msg),
+                 "Worker failure: resource exhausted");
+        self->tasks_failed++;
+
+        lf_print("[Worker %d] Stage 1 Job #%d FAILED: %s",
+                 self->worker_id, task.job_id, result.error_msg);
+      } else {
+        // Task succeeded
+        result.succeeded = true;
+        result.records_processed = records;
+        result.intermediate_data = records * 100;  // Simulated intermediate result
+        snprintf(result.error_msg, sizeof(result.error_msg), "");
+        self->stage1_completed++;
+        self->total_processing_time_ms += proc_time_ms;
+
+        lf_print("[Worker %d] Stage 1 Job #%d completed: %d records in %ld ms",
+                 self->worker_id, task.job_id, records, proc_time_ms);
+      }
+
+      // Handle based on pattern
+      if (task.pattern == SINGLE_NODE) {
+        // Single node - send directly to reducer
+        lf_print("[Worker %d]    SINGLE_NODE: Sending final result to Reducer\n",
+                 self->worker_id);
+        result.is_final_stage = true;
+        lf_set(stage2_result, result);
+        self->tasks_processed++;
+
+      } else if (task.pattern == SEQUENTIAL) {
+        // Sequential - send to next worker in pipeline
+        lf_print("[Worker %d]    SEQUENTIAL: Sending to Worker %d for Stage 2",
+                 self->worker_id, task.target_worker);
+        result.is_final_stage = false;
+        lf_set(stage1_result, result);
+        // No need to track pending for sequential from this worker's perspective
+
+      } else {  // PARALLEL_CROSS
+        // Cross-dependency - send to peer and wait for peer's result
+        lf_print("[Worker %d]    PARALLEL_CROSS: Sending Stage 1 to peer (intermediate=%d)",
+                 self->worker_id, result.intermediate_data);
+
+        // Store my Stage 1 result and Stage 2 bounds for reference
+        self->my_stage1_results[job_slot] = result;
+
+        // Send Stage 1 result to peer (via router)
+        lf_set(stage1_result, result);
+
+        // Mark this job as waiting for peer's Stage 1 result
+        if (self->pending_stage2_count < 50) {
+          self->pending_stage2_jobs[self->pending_stage2_count++] = task.job_id;
+        } else {
+          lf_print("[Worker %d] Pending queue full, dropping Job #%d", self->worker_id, task.job_id);
+          self->tasks_failed++;
+        }
+      }
+    }
+  =}
+
+  // Process Stage 2 task when peer's Stage 1 result arrives
+  reaction(peer_stage1_result) -> stage2_result {=
+    if (peer_stage1_result->is_present) {
+      map_result_t peer_result = peer_stage1_result->value;
+      int job_id = peer_result.job_id;
+
+      const char* pattern_name = (peer_result.pattern == SEQUENTIAL) ? "SEQUENTIAL" : "PARALLEL_CROSS";
+
+      lf_print("[Worker %d] Received Stage 1 result for Job #%d [%s]",
+               self->worker_id, job_id, pattern_name);
+
+      if (peer_result.pattern == SEQUENTIAL) {
+        // Sequential pattern: I'm the second worker in the pipeline
+        // Process the peer's output as Stage 2
+        lf_print("[Worker %d] STAGE 2 - SEQUENTIAL Pipeline from Worker %d",
+                 self->worker_id, peer_result.worker_id);
+        lf_print("[Worker %d]     Received %d records, intermediate=%d",
+                 self->worker_id, peer_result.records_processed, peer_result.intermediate_data);
+
+        if (!peer_result.succeeded) {
+          lf_print("[Worker %d] Cannot proceed: Stage 1 from peer failed",
+                   self->worker_id);
+          self->tasks_failed++;
+          return;
+        }
+
+        // Process Stage 2 using peer's output
+        long proc_time_ms = self->base_processing_time_ms +
+                            (peer_result.records_processed * 0.2) +
+                            (peer_result.intermediate_data * 0.001) +
+                            random_range(-50, 100);
+
+        if (proc_time_ms < 50) proc_time_ms = 50;
+
+        lf_print("[Worker %d]     Processing Stage 2... (estimated %ld ms)",
+                 self->worker_id, proc_time_ms);
+
+        lf_sleep(proc_time_ms * MSEC(1));
+
+        // Create final result
+        map_result_t final_result;
+        final_result.job_id = job_id;
+        final_result.task_id = self->worker_id;
+        final_result.worker_id = self->worker_id;
+        final_result.processing_time_ms = peer_result.processing_time_ms + proc_time_ms;
+        final_result.completion_time = current_time_ms();
+        final_result.processing_stage = 2;
+        final_result.succeeded = true;
+        final_result.records_processed = peer_result.records_processed;
+        final_result.intermediate_data = 0;
+        final_result.pattern = SEQUENTIAL;
+        final_result.is_final_stage = true;
+        snprintf(final_result.error_msg, sizeof(final_result.error_msg), "");
+
+        self->stage2_completed++;
+        self->tasks_processed++;
+        self->total_processing_time_ms += proc_time_ms;
+
+        lf_print("[Worker %d] SEQUENTIAL Job #%d completed: %d records in %ld ms total",
+                 self->worker_id, job_id, final_result.records_processed,
+                 final_result.processing_time_ms);
+        lf_print("[Worker %d]    Sending final result to Reducer\n",
+                 self->worker_id);
+
+        lf_set(stage2_result, final_result);
+
+      } else {  // PARALLEL_CROSS
+        // Cross-dependency pattern: Need both workers' Stage 1 results
+        lf_print("[Worker %d]     Peer intermediate_data=%d",
+                 self->worker_id, peer_result.intermediate_data);
+
+        // Check if we have this job pending
+        int pending_slot = -1;
+        for (int i = 0; i < self->pending_stage2_count; i++) {
+          if (self->pending_stage2_jobs[i] == job_id) {
+            pending_slot = i;
+            break;
+          }
+        }
+
+        if (pending_slot == -1) {
+          lf_print("[Worker %d] Warning: Received peer Stage 1 for Job #%d but not in pending list",
+                   self->worker_id, job_id);
+          return;
+        }
+
+        // Get my Stage 1 result
+        int my_slot = job_id % 50;
+        map_result_t my_stage1 = self->my_stage1_results[my_slot];
+
+        if (!my_stage1.succeeded || !peer_result.succeeded) {
+          lf_print("[Worker %d] Cannot proceed to Stage 2: Stage 1 failure detected",
+                   self->worker_id);
+          self->tasks_failed++;
+
+          // Remove from pending
+          for (int i = pending_slot; i < self->pending_stage2_count - 1; i++) {
+            self->pending_stage2_jobs[i] = self->pending_stage2_jobs[i + 1];
+          }
+          self->pending_stage2_count--;
+          return;
+        }
+
+        lf_print("[Worker %d] STAGE 2 - PARALLEL_CROSS with cross-dependency",
+                 self->worker_id);
+        lf_print("[Worker %d]     My Stage 1: %d records, intermediate=%d",
+                 self->worker_id, my_stage1.records_processed, my_stage1.intermediate_data);
+        lf_print("[Worker %d]     Peer Stage 1: %d records, intermediate=%d",
+                 self->worker_id, peer_result.records_processed, peer_result.intermediate_data);
+
+        // Stage 2: Process second partition + use peer's intermediate data
+        // Explicit bounds provided by master to avoid drift.
+        int slot = job_id % 50;
+        int partition_start = self->stage2_start[slot];
+        int partition_end = self->stage2_end[slot];
+
+        lf_print("[Worker %d]     Stage 2 partition: records [%d-%d] + peer's intermediate data",
+                 self->worker_id, partition_start, partition_end);
+
+        // Simulate Stage 2 processing (using both my data and peer's intermediate result)
+        long proc_time_ms = self->base_processing_time_ms +
+                            (my_stage1.records_processed * 0.1) +
+                            (peer_result.intermediate_data * 0.001) +  // Use peer's data
+                            random_range(-50, 100);
+
+        if (proc_time_ms < 50) proc_time_ms = 50;
+
+        lf_print("[Worker %d]     Processing Stage 2... (estimated %ld ms)",
+                 self->worker_id, proc_time_ms);
+
+        lf_sleep(proc_time_ms * MSEC(1));
+
+        // Create final Stage 2 result
+        map_result_t final_result;
+        final_result.job_id = job_id;
+        final_result.task_id = self->worker_id;
+        final_result.worker_id = self->worker_id;
+        final_result.processing_time_ms = my_stage1.processing_time_ms + proc_time_ms;
+        final_result.completion_time = current_time_ms();
+        final_result.processing_stage = 2;  // Stage 2 (final)
+        final_result.succeeded = true;
+        int stage2_span = partition_end - partition_start;
+        final_result.records_processed = my_stage1.records_processed + stage2_span;  // Both Stage 1 and Stage 2 partitions
+        final_result.intermediate_data = 0;  // Not needed for final result
+        final_result.pattern = PARALLEL_CROSS;
+        final_result.is_final_stage = true;
+        snprintf(final_result.error_msg, sizeof(final_result.error_msg), "");
+
+        self->stage2_completed++;
+        self->tasks_processed++;
+        self->total_processing_time_ms += proc_time_ms;
+
+        lf_print("[Worker %d] PARALLEL_CROSS Job #%d completed: %d total records in %ld ms total",
+                 self->worker_id, job_id, final_result.records_processed,
+                 final_result.processing_time_ms);
+        lf_print("[Worker %d]    Sending final result to Reducer\n",
+                 self->worker_id);
+
+        // Send final Stage 2 result to Reducer
+        lf_set(stage2_result, final_result);
+
+        // Remove from pending
+        for (int i = pending_slot; i < self->pending_stage2_count - 1; i++) {
+          self->pending_stage2_jobs[i] = self->pending_stage2_jobs[i + 1];
+        }
+        self->pending_stage2_count--;
+      }
+    }
+  =}
+
+  reaction(shutdown) {=
+    lf_print("\n[Worker %d] === STATISTICS ===", self->worker_id);
+    lf_print("[Worker %d] Stage 1 completed: %d", self->worker_id, self->stage1_completed);
+    lf_print("[Worker %d] Stage 2 completed: %d", self->worker_id, self->stage2_completed);
+    lf_print("[Worker %d] Total tasks processed: %d", self->worker_id, self->tasks_processed);
+    lf_print("[Worker %d] Tasks failed: %d", self->worker_id, self->tasks_failed);
+    if (self->tasks_processed > 0) {
+      lf_print("[Worker %d] Avg processing time: %ld ms",
+               self->worker_id,
+               self->total_processing_time_ms / self->tasks_processed);
+    }
+    double success_rate = (self->tasks_processed + self->tasks_failed) > 0 ?
+                          (100.0 * self->tasks_processed) / (self->tasks_processed + self->tasks_failed) : 0;
+    lf_print("[Worker %d] Success rate: %.1f%%", self->worker_id, success_rate);
+    if (self->pending_stage2_count > 0) {
+      lf_print("[Worker %d] Pending Stage 2 jobs: %d", self->worker_id, self->pending_stage2_count);
+    }
+  =}
+}
+
+/**
+ * Reducer - Aggregates Stage 2 results and completes jobs
+ *
+ * Simulates the reduce/aggregation phase:
+ * - Collects Stage 2 (final) results from both workers
+ * - Waits for both workers' Stage 2 results
+ * - Handles failures and coordinates retries
+ * - Computes end-to-end job latency
+ * - Generates final job results
+ * Note: Only processes Stage 2 results (Stage 1 results route between workers)
+ */
+reactor Reducer {
+  input from_worker1: map_result_t
+  input from_worker2: map_result_t
+
+  state jobs_completed: int = 0
+  state jobs_failed: int = 0
+  state total_latency_ms: long = 0
+  state total_retries: int = 0
+
+  // Storage for partial results (waiting for both tasks)
+  state pending_results: map_result_t[100]  // 50 jobs * 2 tasks = 100 slots
+  state pending_task_mask: int[50]          // Bitmask: which tasks arrived (bit 0,1)
+  state pending_job_ids: int[50]            // Job ID for each slot
+  state pending_count: int = 0              // Number of jobs with pending tasks
+
+  reaction(from_worker1, from_worker2) {=
+    // Process results from both workers
+    map_result_t* results[2] = {NULL, NULL};
+
+    if (from_worker1->is_present) {
+      static map_result_t r1;
+      r1 = from_worker1->value;
+      results[0] = &r1;
+      const char* pattern_name = (r1.pattern == SINGLE_NODE) ? "SINGLE_NODE" :
+                                 (r1.pattern == SEQUENTIAL) ? "SEQUENTIAL" : "PARALLEL_CROSS";
+      lf_print("[Reducer] Worker 1: Job #%d [%s] (%s)",
+               r1.job_id, pattern_name, r1.succeeded ? "success" : "failure");
+    }
+    if (from_worker2->is_present) {
+      static map_result_t r2;
+      r2 = from_worker2->value;
+      results[1] = &r2;
+      const char* pattern_name = (r2.pattern == SINGLE_NODE) ? "SINGLE_NODE" :
+                                 (r2.pattern == SEQUENTIAL) ? "SEQUENTIAL" : "PARALLEL_CROSS";
+      lf_print("[Reducer] Worker 2: Job #%d [%s] (%s)",
+               r2.job_id, pattern_name, r2.succeeded ? "success" : "failure");
+    }
+
+    // Process each incoming result
+    for (int w = 0; w < 2; w++) {
+      if (results[w] == NULL) continue;
+
+      map_result_t result = *results[w];
+      int job_id = result.job_id;
+      int task_id = result.task_id;
+
+      // Check if this is a single-result job (SINGLE_NODE or SEQUENTIAL)
+      if (result.pattern == SINGLE_NODE || result.pattern == SEQUENTIAL) {
+        // These patterns produce only one final result
+        if (result.succeeded) {
+          lf_print("[Reducer] Job #%d COMPLETED (single result):", job_id);
+          lf_print("[Reducer]    Records processed: %d", result.records_processed);
+          lf_print("[Reducer]    Processing time: %ld ms", result.processing_time_ms);
+          lf_print("[Reducer]    Worker: %d\n", result.worker_id);
+
+          self->jobs_completed++;
+          self->total_latency_ms += result.processing_time_ms;
+        } else {
+          lf_print("[Reducer] Job #%d FAILED:", job_id);
+          lf_print("[Reducer]    Error: %s", result.error_msg);
+          lf_print("[Reducer]    (In production, would trigger retry)\n");
+          self->jobs_failed++;
+        }
+        continue;  // Don't wait for second result
+      }
+
+      // PARALLEL_CROSS pattern: Need both workers' results
+      // Find or create slot for this job
+      int slot = -1;
+      for (int i = 0; i < self->pending_count; i++) {
+        if (self->pending_job_ids[i] == job_id) {
+          slot = i;
+          break;
+        }
+      }
+
+      if (slot == -1) {
+        // New job, create slot
+        slot = self->pending_count++;
+        self->pending_job_ids[slot] = job_id;
+        self->pending_task_mask[slot] = 0;
+      }
+
+      // Store result and mark task as received
+      // Flattened index: slot * 2 + (task_id - 1)
+      self->pending_results[slot * 2 + (task_id - 1)] = result;
+      self->pending_task_mask[slot] |= (1 << (task_id - 1));
+
+      // Check if both tasks are complete (bitmask == 0b11 == 3)
+      if (self->pending_task_mask[slot] == 3) {
+        lf_print("[Reducer] Job #%d: Both tasks completed, reducing...", job_id);
+
+        map_result_t t1 = self->pending_results[slot * 2 + 0];
+        map_result_t t2 = self->pending_results[slot * 2 + 1];
+
+        int total_records = t1.records_processed + t2.records_processed;
+
+        // Find max processing time (critical path)
+        long max_proc_time = (t1.processing_time_ms > t2.processing_time_ms) ?
+                             t1.processing_time_ms : t2.processing_time_ms;
+        long total_proc_time = t1.processing_time_ms + t2.processing_time_ms;
+
+        bool job_succeeded = t1.succeeded && t2.succeeded;
+
+        if (job_succeeded) {
+          lf_print("[Reducer] Job #%d COMPLETED (parallel):", job_id);
+          lf_print("[Reducer]    Records processed: %d", total_records);
+          lf_print("[Reducer]    Worker times: W1=%ld ms | W2=%ld ms",
+                   t1.processing_time_ms, t2.processing_time_ms);
+          lf_print("[Reducer]    Parallel time (critical path): %ld ms", max_proc_time);
+          lf_print("[Reducer]    Sequential equivalent: %ld ms", total_proc_time);
+          lf_print("[Reducer]    Speedup from parallelization: %.2fx",
+                   (double)total_proc_time / max_proc_time);
+          lf_print("[Reducer]    Parallel efficiency: %.1f%%\n",
+                   100.0 * total_proc_time / (2 * max_proc_time));
+
+          self->jobs_completed++;
+          self->total_latency_ms += max_proc_time;
+        } else {
+          lf_print("[Reducer] Job #%d FAILED:", job_id);
+          if (!t1.succeeded) lf_print("[Reducer]    Task 1: %s", t1.error_msg);
+          if (!t2.succeeded) lf_print("[Reducer]    Task 2: %s", t2.error_msg);
+          lf_print("[Reducer]    (In production, would trigger retry)\n");
+          self->jobs_failed++;
+        }
+
+        // Remove this job from pending
+        for (int i = slot; i < self->pending_count - 1; i++) {
+          self->pending_job_ids[i] = self->pending_job_ids[i + 1];
+          self->pending_task_mask[i] = self->pending_task_mask[i + 1];
+          // Copy 2 tasks for this slot
+          for (int j = 0; j < 2; j++) {
+            self->pending_results[i * 2 + j] = self->pending_results[(i + 1) * 2 + j];
+          }
+        }
+        self->pending_count--;
+      } else {
+        // Still waiting for other task
+        int received = 0;
+        for (int i = 0; i < 2; i++) {
+          if (self->pending_task_mask[slot] & (1 << i)) received++;
+        }
+        lf_print("[Reducer] Job #%d: %d/2 tasks received, waiting...\n",
+                 job_id, received);
+      }
+    }
+  =}
+
+  reaction(shutdown) {=
+    lf_print("\n[Reducer] =========================================");
+    lf_print("[Reducer] === FINAL CLUSTER STATISTICS ===");
+    lf_print("[Reducer] =========================================");
+    lf_print("[Reducer] Jobs completed: %d", self->jobs_completed);
+    lf_print("[Reducer] Jobs failed: %d", self->jobs_failed);
+
+    if (self->jobs_completed > 0) {
+      lf_print("[Reducer] Average job processing time: %ld ms",
+               self->total_latency_ms / self->jobs_completed);
+      double success_rate = (100.0 * self->jobs_completed) /
+                            (self->jobs_completed + self->jobs_failed);
+      lf_print("[Reducer] Job success rate: %.1f%%", success_rate);
+      lf_print("[Reducer] Total throughput: %.2f jobs/sec",
+               self->jobs_completed / 30.0);  // 30 second runtime
+    }
+
+    if (self->pending_count > 0) {
+      lf_print("[Reducer] Incomplete jobs: %d", self->pending_count);
+      for (int i = 0; i < self->pending_count; i++) {
+        int received = 0;
+        for (int j = 0; j < 2; j++) {
+          if (self->pending_task_mask[i] & (1 << j)) received++;
+        }
+        lf_print("[Reducer]   Job #%d: %d/2 tasks received",
+                 self->pending_job_ids[i], received);
+      }
+    }
+
+    lf_print("[Reducer] =========================================\n");
+  =}
+}
+
+/**
+ * RouterNode - Intermediary message router (prevents direct worker-to-worker communication)
+ *
+ * Routes all messages through a central router to:
+ * - Route Stage 1 tasks from Master to Workers
+ * - Route Stage 1 results between Workers (cross-dependency)
+ * - Route Stage 2 results from Workers to Reducer
+ * - Prevent message loops using stage markers
+ * - Validate message flow
+ *
+ * Message Flow by Pattern:
+ *
+ * SINGLE_NODE:
+ * 1. Master → Router → Worker (task)
+ * 2. Worker → Router → Reducer (final result)
+ *
+ * SEQUENTIAL:
+ * 1. Master → Router → Worker A (Stage 1 task)
+ * 2. Worker A → Router → Worker B (Stage 1 result)
+ * 3. Worker B → Router → Reducer (Stage 2 final result)
+ *
+ * PARALLEL_CROSS:
+ * 1. Master → Router → Workers (Stage 1 tasks to both)
+ * 2. Worker 1 Stage 1 result → Router → Worker 2
+ * 3. Worker 2 Stage 1 result → Router → Worker 1
+ * 4. Both Workers Stage 2 results → Router → Reducer
+ */
+reactor RouterNode {
+  // Inputs from various nodes
+  input from_master_w1: map_task_t
+  input from_master_w2: map_task_t
+  input from_worker1_stage1: map_result_t
+  input from_worker2_stage1: map_result_t
+  input from_worker1_stage2: map_result_t
+  input from_worker2_stage2: map_result_t
+
+  // Outputs to various nodes
+  output to_worker1_task: map_task_t
+  output to_worker2_task: map_task_t
+  output to_worker1_peer: map_result_t
+  output to_worker2_peer: map_result_t
+  output to_reducer_w1: map_result_t
+  output to_reducer_w2: map_result_t
+
+  state messages_routed: int = 0
+  state stage1_results_routed: int = 0
+  state stage2_results_routed: int = 0
+
+  // Route Stage 1 tasks from Master to Workers
+  reaction(from_master_w1) -> to_worker1_task {=
+    if (from_master_w1->is_present) {
+      map_task_t task = from_master_w1->value;
+      lf_print("[Router] Routing Stage 1 Task (Job #%d) to Worker 1",
+               task.job_id);
+      lf_set(to_worker1_task, task);
+      self->messages_routed++;
+    }
+  =}
+
+  reaction(from_master_w2) -> to_worker2_task {=
+    if (from_master_w2->is_present) {
+      map_task_t task = from_master_w2->value;
+      lf_print("[Router] Routing Stage 1 Task (Job #%d) to Worker 2",
+               task.job_id);
+      lf_set(to_worker2_task, task);
+      self->messages_routed++;
+    }
+  =}
+
+  // Route Stage 1 results between Workers (cross-dependency)
+  reaction(from_worker1_stage1) -> to_worker2_peer {=
+    if (from_worker1_stage1->is_present) {
+      map_result_t result = from_worker1_stage1->value;
+      if (result.processing_stage == 1) {
+        lf_print("[Router] Routing Worker 1 Stage 1 result (Job #%d) to Worker 2",
+                 result.job_id);
+        lf_set(to_worker2_peer, result);
+        self->stage1_results_routed++;
+        self->messages_routed++;
+      } else {
+        lf_print("[Router] Warning: Received non-Stage 1 result from Worker 1");
+      }
+    }
+  =}
+
+  reaction(from_worker2_stage1) -> to_worker1_peer {=
+    if (from_worker2_stage1->is_present) {
+      map_result_t result = from_worker2_stage1->value;
+      if (result.processing_stage == 1) {
+        lf_print("[Router] Routing Worker 2 Stage 1 result (Job #%d) to Worker 1",
+                 result.job_id);
+        lf_set(to_worker1_peer, result);
+        self->stage1_results_routed++;
+        self->messages_routed++;
+      } else {
+        lf_print("[Router] Warning: Received non-Stage 1 result from Worker 2");
+      }
+    }
+  =}
+
+  // Route Stage 2 (final) results from Workers to Reducer
+  reaction(from_worker1_stage2) -> to_reducer_w1 {=
+    if (from_worker1_stage2->is_present) {
+      map_result_t result = from_worker1_stage2->value;
+      if (result.processing_stage == 2) {
+        lf_print("[Router] Routing Worker 1 Stage 2 result (Job #%d) to Reducer",
+                 result.job_id);
+        lf_set(to_reducer_w1, result);
+        self->stage2_results_routed++;
+        self->messages_routed++;
+      } else {
+        lf_print("[Router] Warning: Received non-Stage 2 result from Worker 1 on Stage 2 port");
+      }
+    }
+  =}
+
+  reaction(from_worker2_stage2) -> to_reducer_w2 {=
+    if (from_worker2_stage2->is_present) {
+      map_result_t result = from_worker2_stage2->value;
+      if (result.processing_stage == 2) {
+        lf_print("[Router] Routing Worker 2 Stage 2 result (Job #%d) to Reducer",
+                 result.job_id);
+        lf_set(to_reducer_w2, result);
+        self->stage2_results_routed++;
+        self->messages_routed++;
+      } else {
+        lf_print("[Router] Warning: Received non-Stage 2 result from Worker 2 on Stage 2 port");
+      }
+    }
+  =}
+
+  reaction(shutdown) {=
+    lf_print("\n[Router] === STATISTICS ===");
+    lf_print("[Router] Total messages routed: %d", self->messages_routed);
+    lf_print("[Router] Stage 1 results routed (cross-dependency): %d", self->stage1_results_routed);
+    lf_print("[Router] Stage 2 results routed to Reducer: %d", self->stage2_results_routed);
+  =}
+}
+
+/**
+ * MasterNode - Master node (client + scheduler)
+ * Represents the control plane of the distributed system
+ */
+reactor MasterNode {
+  output to_worker1: map_task_t
+  output to_worker2: map_task_t
+
+  client = new Client()
+  scheduler = new Scheduler()
+
+  client.out -> scheduler.in
+  scheduler.to_worker1 -> to_worker1
+  scheduler.to_worker2 -> to_worker2
+}
+
+/**
+ * WorkerNode1 - First worker node (same datacenter, 8ms latency)
+ */
+reactor WorkerNode1 {
+  input stage1_task: map_task_t           // Stage 1 task from router
+  input peer_stage1_result: map_result_t  // Worker 2's Stage 1 result from router
+  output stage1_result: map_result_t      // Stage 1 result to router (for Worker 2)
+  output stage2_result: map_result_t      // Final Stage 2 result to router (for Reducer)
+
+  worker = new Worker(worker_id=1)
+
+  stage1_task -> worker.stage1_task
+  peer_stage1_result -> worker.peer_stage1_result
+  worker.stage1_result -> stage1_result
+  worker.stage2_result -> stage2_result
+}
+
+/**
+ * WorkerNode2 - Second worker node (cross-region, 15ms latency)
+ */
+reactor WorkerNode2 {
+  input stage1_task: map_task_t           // Stage 1 task from router
+  input peer_stage1_result: map_result_t  // Worker 1's Stage 1 result from router
+  output stage1_result: map_result_t      // Stage 1 result to router (for Worker 1)
+  output stage2_result: map_result_t      // Final Stage 2 result to router (for Reducer)
+
+  worker = new Worker(worker_id=2)
+
+  stage1_task -> worker.stage1_task
+  peer_stage1_result -> worker.peer_stage1_result
+  worker.stage1_result -> stage1_result
+  worker.stage2_result -> stage2_result
+}
+
+/**
+ * ReducerNode - Result aggregation node
+ */
+reactor ReducerNode {
+  input from_worker1: map_result_t
+  input from_worker2: map_result_t
+
+  reducer = new Reducer()
+
+  from_worker1 -> reducer.from_worker1
+  from_worker2 -> reducer.from_worker2
+}
+
+/**
+ * Host Federate - Master/Router/Reducer with exposed ports for offloaded workers.
+ * Connect the four exposed outputs/inputs to the Zephyr worker boards over TCP
+ * (or your transport of choice). The same map_task_t/map_result_t payloads are
+ * used by the worker file.
+ */
+federated reactor MapReduceHost {
+  // Exposed interfaces for worker boards (connect via @link in your build system).
+  output w1_stage1_task: map_task_t
+  output w2_stage1_task: map_task_t
+  output w1_peer_stage1: map_result_t
+  output w2_peer_stage1: map_result_t
+  input w1_stage1_result: map_result_t
+  input w2_stage1_result: map_result_t
+  input w1_stage2_result: map_result_t
+  input w2_stage2_result: map_result_t
+
+  // Host PC federates only.
+  @platform_native
+  master = new MasterNode()
+
+  @platform_native
+  router = new RouterNode()
+
+  @platform_native
+  reducer = new ReducerNode()
+
+  // Master → Router
+  master.to_worker1 -> router.from_master_w1 after 5 msec
+  master.to_worker2 -> router.from_master_w2 after 5 msec
+
+  // Router → external workers (Stage 1 tasks)
+  router.to_worker1_task -> w1_stage1_task after 8 msec
+  router.to_worker2_task -> w2_stage1_task after 20 msec
+
+  // Router → external workers (cross-dependency Stage 1 results)
+  router.to_worker1_peer -> w1_peer_stage1 after 8 msec
+  router.to_worker2_peer -> w2_peer_stage1 after 20 msec
+
+  // External workers → Router
+  w1_stage1_result -> router.from_worker1_stage1 after 8 msec
+  w2_stage1_result -> router.from_worker2_stage1 after 20 msec
+  w1_stage2_result -> router.from_worker1_stage2 after 8 msec
+  w2_stage2_result -> router.from_worker2_stage2 after 20 msec
+
+  // Router → Reducer
+  router.to_reducer_w1 -> reducer.from_worker1 after 8 msec
+  router.to_reducer_w2 -> reducer.from_worker2 after 8 msec
+}

@@ -2,6 +2,11 @@
  * Realistic Distributed Data Processing System in Lingua Franca
  * ==============================================================
  *
+ * Monolithic reference version targeting microC. Master, router, reducer,
+ * and both workers live in one federated file. For the PC/Zephyr split used
+ * on the FRDM-K64F boards, see MapReduceHost.lf (PC) and MapReduceWorker.lf
+ * (workers) in this same folder.
+ *
  * Simulates a real-world distributed computing framework similar to MapReduce, Spark,
  * or cloud-based data processing pipelines. This system demonstrates:
  * - Job submission and task distribution
@@ -150,8 +155,11 @@
  * - Failure rate: 5% (realistic distributed system)
  *
  * @author Jack
+ * Deployment: Master/Router/Reducer on host PC, Workers on two microcontrollers.
  */
-target C {
+target uC {
+  // Default to the host PC; worker federates override with @platform_zephyr.
+  platform: Native,
   timeout: 30 sec,
   coordination: decentralized
 }
@@ -195,6 +203,8 @@ preamble {=
     processing_pattern_t pattern;  // Processing pattern for this task
     int target_worker;             // Target worker for this task
     bool is_final_stage;           // True if this is the final stage (send to reducer)
+    int stage2_start;              // Explicit Stage 2 start (records)
+    int stage2_end;                // Explicit Stage 2 end (records)
   } map_task_t;
 
   // Map task result (intermediate or final)
@@ -230,9 +240,8 @@ preamble {=
 
   // Get current time in milliseconds
   static inline long current_time_ms() {
-    struct timespec ts;
-    clock_gettime(CLOCK_REALTIME, &ts);
-    return ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+    // microC-friendly physical time in milliseconds.
+    return lf_time_physical() / MSEC(1);
   }
 =}
 
@@ -355,6 +364,8 @@ reactor Scheduler {
         task.pattern = SINGLE_NODE;
         task.target_worker = job.target_worker;
         task.is_final_stage = true;  // Goes directly to reducer
+        task.stage2_start = 0;
+        task.stage2_end = job.num_records;
         snprintf(task.operation, sizeof(task.operation), "%s", job.job_type);
 
         lf_print("[Scheduler]   → Task → Worker %d: all records [0-%d], %d KB",
@@ -390,6 +401,8 @@ reactor Scheduler {
         task1.pattern = SEQUENTIAL;
         task1.target_worker = next_worker;  // Next worker in pipeline
         task1.is_final_stage = false;  // Not final, goes to peer
+        task1.stage2_start = 0;
+        task1.stage2_end = job.num_records;
         snprintf(task1.operation, sizeof(task1.operation), "%s", job.job_type);
 
         lf_print("[Scheduler]   → Stage 1 → Worker %d: records [0-%d], %d KB",
@@ -430,6 +443,8 @@ reactor Scheduler {
         task1.pattern = PARALLEL_CROSS;
         task1.target_worker = 2;  // Result goes to Worker 2
         task1.is_final_stage = false;
+        task1.stage2_start = partition_size;          // 25% mark
+        task1.stage2_end = partition_size * 2;        // 50% mark
         snprintf(task1.operation, sizeof(task1.operation), "%s", job.job_type);
 
         // Create Stage 1 task for Worker 2 (third quarter: 50-75%)
@@ -445,6 +460,8 @@ reactor Scheduler {
         task2.pattern = PARALLEL_CROSS;
         task2.target_worker = 1;  // Result goes to Worker 1
         task2.is_final_stage = false;
+        task2.stage2_start = partition_size * 3;      // 75% mark
+        task2.stage2_end = job.num_records;           // 100% (captures remainder)
         snprintf(task2.operation, sizeof(task2.operation), "%s", job.job_type);
 
         lf_print("[Scheduler]   → Stage 1 Task 1 → Worker 1: records [%d-%d], %d KB (0-25%%)",
@@ -503,6 +520,8 @@ reactor Worker(
   state pending_stage2_jobs: int[50]       // Job IDs waiting for Stage 2
   state pending_stage2_count: int = 0
   state my_stage1_results: map_result_t[50]  // My Stage 1 results for reference
+  state stage2_start: int[50]               // Explicit Stage 2 start per job
+  state stage2_end: int[50]                 // Explicit Stage 2 end per job
 
   // Process Stage 1 task
   reaction(stage1_task) -> stage1_result, stage2_result {=
@@ -518,6 +537,11 @@ reactor Worker(
       lf_print("[Worker %d]     Operation: %s | Data: %d KB | Records: [%d-%d]",
                self->worker_id, task.operation, task.data_size_kb,
                task.partition_start, task.partition_end);
+
+      // Record Stage 2 bounds for this job (used when peer result arrives).
+      int job_slot = task.job_id % 50;
+      self->stage2_start[job_slot] = task.stage2_start;
+      self->stage2_end[job_slot] = task.stage2_end;
 
       // Calculate processing time based on data size (realistic CPU-bound work)
       int records = task.partition_end - task.partition_start;
@@ -593,15 +617,19 @@ reactor Worker(
         lf_print("[Worker %d]    PARALLEL_CROSS: Sending Stage 1 to peer (intermediate=%d)",
                  self->worker_id, result.intermediate_data);
 
-        // Store my Stage 1 result for reference
-        int slot = task.job_id % 50;
-        self->my_stage1_results[slot] = result;
+        // Store my Stage 1 result and Stage 2 bounds for reference
+        self->my_stage1_results[job_slot] = result;
 
         // Send Stage 1 result to peer (via router)
         lf_set(stage1_result, result);
 
         // Mark this job as waiting for peer's Stage 1 result
-        self->pending_stage2_jobs[self->pending_stage2_count++] = task.job_id;
+        if (self->pending_stage2_count < 50) {
+          self->pending_stage2_jobs[self->pending_stage2_count++] = task.job_id;
+        } else {
+          lf_print("[Worker %d] Pending queue full, dropping Job #%d", self->worker_id, task.job_id);
+          self->tasks_failed++;
+        }
       }
     }
   =}
@@ -717,11 +745,10 @@ reactor Worker(
                  self->worker_id, peer_result.records_processed, peer_result.intermediate_data);
 
         // Stage 2: Process second partition + use peer's intermediate data
-        // Worker 1 processes [25-50%], Worker 2 processes [75-100%]
-        int partition_start = (self->worker_id == 1) ?
-                             my_stage1.records_processed :
-                             my_stage1.records_processed + peer_result.records_processed;
-        int partition_end = partition_start + my_stage1.records_processed;
+        // Explicit bounds provided by master to avoid drift.
+        int slot = job_id % 50;
+        int partition_start = self->stage2_start[slot];
+        int partition_end = self->stage2_end[slot];
 
         lf_print("[Worker %d]     Stage 2 partition: records [%d-%d] + peer's intermediate data",
                  self->worker_id, partition_start, partition_end);
@@ -748,7 +775,8 @@ reactor Worker(
         final_result.completion_time = current_time_ms();
         final_result.processing_stage = 2;  // Stage 2 (final)
         final_result.succeeded = true;
-        final_result.records_processed = my_stage1.records_processed * 2;  // Both partitions
+        int stage2_span = partition_end - partition_start;
+        final_result.records_processed = my_stage1.records_processed + stage2_span;  // Both Stage 1 and Stage 2 partitions
         final_result.intermediate_data = 0;  // Not needed for final result
         final_result.pattern = PARALLEL_CROSS;
         final_result.is_final_stage = true;
@@ -1258,10 +1286,20 @@ reactor ReducerNode {
  */
 federated reactor MapReduce {
   // Create all federates (5 nodes total with router)
+  // Host PC: Master, Router, Reducer. Microcontrollers: Worker 1 & 2.
+  @platform_native
   master = new MasterNode()
+
+  @platform_native
   router = new RouterNode()
+
+  @platform_zephyr
   worker1 = new WorkerNode1()
+
+  @platform_zephyr
   worker2 = new WorkerNode2()
+
+  @platform_native
   reducer = new ReducerNode()
 
   // Master → Router → Workers (Stage 1 task distribution)
