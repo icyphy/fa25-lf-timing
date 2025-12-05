@@ -1,19 +1,20 @@
 /**
- * MapReduce worker-side federate for FRDM-K64F (Zephyr/microC).
- * Compile once with worker_id=1 and again with worker_id=2.
- * Exposes ports to be wired to the host router (MapReduceHost.lf):
- *  - Inputs:  stage1_task, peer_stage1_result
- *  - Outputs: stage1_result, stage2_result
- * Connect these to the matching w*-prefixed ports on MapReduceHost via TCP links
- * or your transport of choice.
+ * MapReduce Worker - Zephyr worker for microcontrollers
+ *
+ * Worker-side implementation for split deployment.
+ *
+ * Worker Reactor:
+ * - Receives stage1_task from scheduler via router
+ * - Processes task and outputs stage1_result (SEQ/PARALLEL) or stage2_result (SINGLE)
+ * - For SEQUENTIAL: receives peer_stage1_result and does stage 2 processing
+ * - For PARALLEL_CROSS: receives peer_stage1_result with other worker's data for stage 2
  */
 target uC {
-  platform: Zephyr,
-  timeout: 30 sec,
-  coordination: decentralized
+  timeout: 30 sec
 }
 
-// Shared types with the host.
+import MapReduceTypes from "MapReduce.lf"
+
 preamble {=
   #include <stdlib.h>
   #include <time.h>
@@ -21,389 +22,106 @@ preamble {=
   #include <stdbool.h>
 
   typedef enum {
-    SINGLE_NODE,
-    SEQUENTIAL,
-    PARALLEL_CROSS
+    SINGLE_NODE, SEQUENTIAL, PARALLEL_CROSS
   } processing_pattern_t;
 
   typedef struct {
     int job_id;
-    int task_id;
-    int partition_start;
-    int partition_end;
-    int data_size_kb;
-    char operation[32];
-    long submission_time;
-    int retry_count;
-    int processing_stage;
     processing_pattern_t pattern;
     int target_worker;
-    bool is_final_stage;
-    int stage2_start;              // Explicit Stage 2 start (records)
-    int stage2_end;                // Explicit Stage 2 end (records)
+    long start_time;
+    char log[128];
   } map_task_t;
 
   typedef struct {
     int job_id;
-    int task_id;
-    int records_processed;
-    long processing_time_ms;
     int worker_id;
-    bool succeeded;
-    char error_msg[64];
-    long completion_time;
-    int processing_stage;
-    int intermediate_data;
     processing_pattern_t pattern;
-    bool is_final_stage;
+    long processing_time_ms;
+    bool succeeded;
+    char log[128];
   } map_result_t;
+
+  static inline long current_time_ms() {
+    return lf_time_physical() / MSEC(1);
+  }
 
   static inline int random_range(int min, int max) {
     return min + (rand() % (max - min + 1));
   }
-
-  static inline long current_time_ms() {
-    // microC-friendly physical time in milliseconds.
-    return lf_time_physical() / MSEC(1);
-  }
 =}
 
-/**
- * Worker - Two-stage worker node with cross-dependency processing
- *
- * Simulates a real worker machine with:
- * - Stage 1: Process first partition (0-25% or 50-75% of total data)
- * - Stage 2: Process second partition (25-50% or 75-100%) + peer's Stage 1 output
- * - Cross-dependency: Must wait for peer's Stage 1 before starting Stage 2
- * - CPU processing time proportional to data size
- * - Task failure simulation (5% failure rate)
- * - Resource monitoring
- */
-reactor Worker(
-    worker_id: int = 1,
-    base_processing_time_ms: int = 100,
-    failure_rate: int = 5  // 5% failure rate
-) {
-  input stage1_task: map_task_t      // Stage 1 task from scheduler
-  input peer_stage1_result: map_result_t  // Peer's Stage 1 result for Stage 2
-  output stage1_result: map_result_t      // Stage 1 result to peer
-  output stage2_result: map_result_t      // Final Stage 2 result to reducer
+// Processes tasks; simulates work with lf_sleep based on base_processing_ms ± random variation
+reactor Worker(worker_id: int = 1, base_processing_ms: int = 100) {
+  input stage1_task: map_task_t
+  input peer_stage1_result: map_result_t
+  output stage1_result: map_result_t
+  output stage2_result: map_result_t
 
   state tasks_processed: int = 0
-  state tasks_failed: int = 0
-  state total_processing_time_ms: long = 0
-  state stage1_completed: int = 0
-  state stage2_completed: int = 0
+  state pending_count: int = 0
 
-  // Storage for pending Stage 2 tasks (waiting for peer's Stage 1)
-  state pending_stage2_jobs: int[50]       // Job IDs waiting for Stage 2
-  state pending_stage2_count: int = 0
-  state my_stage1_results: map_result_t[50]  // My Stage 1 results for reference
-  state stage2_start: int[50]               // Explicit Stage 2 start per job
-  state stage2_end: int[50]                 // Explicit Stage 2 end per job
-
-  // Process Stage 1 task
   reaction(stage1_task) -> stage1_result, stage2_result {=
-    if (stage1_task->is_present) {
-      map_task_t task = stage1_task->value;
+    if (!stage1_task->is_present) return;
+    map_task_t task = stage1_task->value;
 
-      const char* pattern_name = (task.pattern == SINGLE_NODE) ? "SINGLE_NODE" :
-                                 (task.pattern == SEQUENTIAL) ? "SEQUENTIAL" :
-                                 "PARALLEL_CROSS";
+    long proc_time_ms = self->base_processing_ms + random_range(-20, 50);
+    if (proc_time_ms < 10) proc_time_ms = 10;
 
-      lf_print("[Worker %d] STAGE 1 - Received Job #%d [%s]",
-               self->worker_id, task.job_id, pattern_name);
-      lf_print("[Worker %d]     Operation: %s | Data: %d KB | Records: [%d-%d]",
-               self->worker_id, task.operation, task.data_size_kb,
-               task.partition_start, task.partition_end);
+    snprintf(task.log, sizeof(task.log), "[W%d] S1 J%d", self->worker_id, task.job_id);
+    lf_print("%s", task.log);
+    lf_sleep(proc_time_ms * MSEC(1));
 
-      // Record Stage 2 bounds for this job (used when peer result arrives).
-      int job_slot = task.job_id % 50;
-      self->stage2_start[job_slot] = task.stage2_start;
-      self->stage2_end[job_slot] = task.stage2_end;
+    map_result_t result;
+    result.job_id = task.job_id;
+    result.worker_id = self->worker_id;
+    result.pattern = task.pattern;
+    result.processing_time_ms = proc_time_ms;
+    result.succeeded = true;
+    snprintf(result.log, sizeof(result.log), "Stage1 complete: %ld ms", proc_time_ms);
 
-      // Calculate processing time based on data size (realistic CPU-bound work)
-      int records = task.partition_end - task.partition_start;
-      long proc_time_ms = self->base_processing_time_ms +
-                          (task.data_size_kb * 0.5) +  // 0.5ms per KB
-                          random_range(-50, 100);       // variance
-
-      if (proc_time_ms < 50) proc_time_ms = 50;  // minimum 50ms
-
-      lf_print("[Worker %d]     Processing Stage 1... (estimated %ld ms)",
-               self->worker_id, proc_time_ms);
-
-      // Simulate processing time
-      lf_sleep(proc_time_ms * MSEC(1));
-
-      // Simulate random task failures (5% failure rate)
-      bool task_failed = (rand() % 100) < self->failure_rate;
-
-      // Create Stage 1 result
-      map_result_t result;
-      result.job_id = task.job_id;
-      result.task_id = task.task_id;
-      result.worker_id = self->worker_id;
-      result.processing_time_ms = proc_time_ms;
-      result.completion_time = current_time_ms();
-      result.processing_stage = 1;  // Stage 1
-      result.pattern = task.pattern;
-      result.is_final_stage = task.is_final_stage;
-
-      if (task_failed && task.retry_count == 0) {
-        // Task failed (simulated)
-        result.succeeded = false;
-        result.records_processed = 0;
-        result.intermediate_data = 0;
-        snprintf(result.error_msg, sizeof(result.error_msg),
-                 "Worker failure: resource exhausted");
-        self->tasks_failed++;
-
-        lf_print("[Worker %d] Stage 1 Job #%d FAILED: %s",
-                 self->worker_id, task.job_id, result.error_msg);
-      } else {
-        // Task succeeded
-        result.succeeded = true;
-        result.records_processed = records;
-        result.intermediate_data = records * 100;  // Simulated intermediate result
-        snprintf(result.error_msg, sizeof(result.error_msg), "");
-        self->stage1_completed++;
-        self->total_processing_time_ms += proc_time_ms;
-
-        lf_print("[Worker %d] Stage 1 Job #%d completed: %d records in %ld ms",
-                 self->worker_id, task.job_id, records, proc_time_ms);
-      }
-
-      // Handle based on pattern
-      if (task.pattern == SINGLE_NODE) {
-        // Single node - send directly to reducer
-        lf_print("[Worker %d]    SINGLE_NODE: Sending final result to Reducer\n",
-                 self->worker_id);
-        result.is_final_stage = true;
-        lf_set(stage2_result, result);
-        self->tasks_processed++;
-
-      } else if (task.pattern == SEQUENTIAL) {
-        // Sequential - send to next worker in pipeline
-        lf_print("[Worker %d]    SEQUENTIAL: Sending to Worker %d for Stage 2",
-                 self->worker_id, task.target_worker);
-        result.is_final_stage = false;
-        lf_set(stage1_result, result);
-        // No need to track pending for sequential from this worker's perspective
-
-      } else {  // PARALLEL_CROSS
-        // Cross-dependency - send to peer and wait for peer's result
-        lf_print("[Worker %d]    PARALLEL_CROSS: Sending Stage 1 to peer (intermediate=%d)",
-                 self->worker_id, result.intermediate_data);
-
-        // Store my Stage 1 result and Stage 2 bounds for reference
-        self->my_stage1_results[job_slot] = result;
-
-        // Send Stage 1 result to peer (via router)
-        lf_set(stage1_result, result);
-
-        // Mark this job as waiting for peer's Stage 1 result
-        if (self->pending_stage2_count < 50) {
-          self->pending_stage2_jobs[self->pending_stage2_count++] = task.job_id;
-        } else {
-          lf_print("[Worker %d] Pending queue full, dropping Job #%d", self->worker_id, task.job_id);
-          self->tasks_failed++;
-        }
-      }
+    if (task.pattern == SINGLE_NODE) {
+      lf_set(stage2_result, result);
+      self->tasks_processed++;
+    } else if (task.pattern == SEQUENTIAL) {
+      lf_set(stage1_result, result);
+    } else {  // PARALLEL_CROSS
+      lf_set(stage1_result, result);
+      self->pending_count++;
     }
   =}
 
-  // Process Stage 2 task when peer's Stage 1 result arrives
   reaction(peer_stage1_result) -> stage2_result {=
-    if (peer_stage1_result->is_present) {
-      map_result_t peer_result = peer_stage1_result->value;
-      int job_id = peer_result.job_id;
+    if (!peer_stage1_result->is_present) return;
+    map_result_t peer = peer_stage1_result->value;
 
-      const char* pattern_name = (peer_result.pattern == SEQUENTIAL) ? "SEQUENTIAL" : "PARALLEL_CROSS";
+    long proc_time_ms = self->base_processing_ms + random_range(-20, 50);
+    if (proc_time_ms < 10) proc_time_ms = 10;
 
-      lf_print("[Worker %d] Received Stage 1 result for Job #%d [%s]",
-               self->worker_id, job_id, pattern_name);
+    lf_print("[W%d] S2 J%d", self->worker_id, peer.job_id);
+    lf_sleep(proc_time_ms * MSEC(1));
 
-      if (peer_result.pattern == SEQUENTIAL) {
-        // Sequential pattern: I'm the second worker in the pipeline
-        // Process the peer's output as Stage 2
-        lf_print("[Worker %d] STAGE 2 - SEQUENTIAL Pipeline from Worker %d",
-                 self->worker_id, peer_result.worker_id);
-        lf_print("[Worker %d]     Received %d records, intermediate=%d",
-                 self->worker_id, peer_result.records_processed, peer_result.intermediate_data);
+    map_result_t result;
+    result.job_id = peer.job_id;
+    result.worker_id = self->worker_id;
+    result.pattern = peer.pattern;
+    result.processing_time_ms = proc_time_ms;
+    result.succeeded = peer.succeeded;
+    snprintf(result.log, sizeof(result.log), "Stage2 complete: %ld ms", proc_time_ms);
 
-        if (!peer_result.succeeded) {
-          lf_print("[Worker %d] Cannot proceed: Stage 1 from peer failed",
-                   self->worker_id);
-          self->tasks_failed++;
-          return;
-        }
+    lf_set(stage2_result, result);
+    self->tasks_processed++;
 
-        // Process Stage 2 using peer's output
-        long proc_time_ms = self->base_processing_time_ms +
-                            (peer_result.records_processed * 0.2) +
-                            (peer_result.intermediate_data * 0.001) +
-                            random_range(-50, 100);
-
-        if (proc_time_ms < 50) proc_time_ms = 50;
-
-        lf_print("[Worker %d]     Processing Stage 2... (estimated %ld ms)",
-                 self->worker_id, proc_time_ms);
-
-        lf_sleep(proc_time_ms * MSEC(1));
-
-        // Create final result
-        map_result_t final_result;
-        final_result.job_id = job_id;
-        final_result.task_id = self->worker_id;
-        final_result.worker_id = self->worker_id;
-        final_result.processing_time_ms = peer_result.processing_time_ms + proc_time_ms;
-        final_result.completion_time = current_time_ms();
-        final_result.processing_stage = 2;
-        final_result.succeeded = true;
-        final_result.records_processed = peer_result.records_processed;
-        final_result.intermediate_data = 0;
-        final_result.pattern = SEQUENTIAL;
-        final_result.is_final_stage = true;
-        snprintf(final_result.error_msg, sizeof(final_result.error_msg), "");
-
-        self->stage2_completed++;
-        self->tasks_processed++;
-        self->total_processing_time_ms += proc_time_ms;
-
-        lf_print("[Worker %d] SEQUENTIAL Job #%d completed: %d records in %ld ms total",
-                 self->worker_id, job_id, final_result.records_processed,
-                 final_result.processing_time_ms);
-        lf_print("[Worker %d]    Sending final result to Reducer\n",
-                 self->worker_id);
-
-        lf_set(stage2_result, final_result);
-
-      } else {  // PARALLEL_CROSS
-        // Cross-dependency pattern: Need both workers' Stage 1 results
-        lf_print("[Worker %d]     Peer intermediate_data=%d",
-                 self->worker_id, peer_result.intermediate_data);
-
-        // Check if we have this job pending
-        int pending_slot = -1;
-        for (int i = 0; i < self->pending_stage2_count; i++) {
-          if (self->pending_stage2_jobs[i] == job_id) {
-            pending_slot = i;
-            break;
-          }
-        }
-
-        if (pending_slot == -1) {
-          lf_print("[Worker %d] Warning: Received peer Stage 1 for Job #%d but not in pending list",
-                   self->worker_id, job_id);
-          return;
-        }
-
-        // Get my Stage 1 result
-        int my_slot = job_id % 50;
-        map_result_t my_stage1 = self->my_stage1_results[my_slot];
-
-        if (!my_stage1.succeeded || !peer_result.succeeded) {
-          lf_print("[Worker %d] Cannot proceed to Stage 2: Stage 1 failure detected",
-                   self->worker_id);
-          self->tasks_failed++;
-
-          // Remove from pending
-          for (int i = pending_slot; i < self->pending_stage2_count - 1; i++) {
-            self->pending_stage2_jobs[i] = self->pending_stage2_jobs[i + 1];
-          }
-          self->pending_stage2_count--;
-          return;
-        }
-
-        lf_print("[Worker %d] STAGE 2 - PARALLEL_CROSS with cross-dependency",
-                 self->worker_id);
-        lf_print("[Worker %d]     My Stage 1: %d records, intermediate=%d",
-                 self->worker_id, my_stage1.records_processed, my_stage1.intermediate_data);
-        lf_print("[Worker %d]     Peer Stage 1: %d records, intermediate=%d",
-                 self->worker_id, peer_result.records_processed, peer_result.intermediate_data);
-
-        // Stage 2: Process second partition + use peer's intermediate data
-        // Explicit bounds provided by master to avoid drift.
-        int slot = job_id % 50;
-        int partition_start = self->stage2_start[slot];
-        int partition_end = self->stage2_end[slot];
-
-        lf_print("[Worker %d]     Stage 2 partition: records [%d-%d] + peer's intermediate data",
-                 self->worker_id, partition_start, partition_end);
-
-        // Simulate Stage 2 processing (using both my data and peer's intermediate result)
-        long proc_time_ms = self->base_processing_time_ms +
-                            (my_stage1.records_processed * 0.1) +
-                            (peer_result.intermediate_data * 0.001) +  // Use peer's data
-                            random_range(-50, 100);
-
-        if (proc_time_ms < 50) proc_time_ms = 50;
-
-        lf_print("[Worker %d]     Processing Stage 2... (estimated %ld ms)",
-                 self->worker_id, proc_time_ms);
-
-        lf_sleep(proc_time_ms * MSEC(1));
-
-        // Create final Stage 2 result
-        map_result_t final_result;
-        final_result.job_id = job_id;
-        final_result.task_id = self->worker_id;
-        final_result.worker_id = self->worker_id;
-        final_result.processing_time_ms = my_stage1.processing_time_ms + proc_time_ms;
-        final_result.completion_time = current_time_ms();
-        final_result.processing_stage = 2;  // Stage 2 (final)
-        final_result.succeeded = true;
-        int stage2_span = partition_end - partition_start;
-        final_result.records_processed = my_stage1.records_processed + stage2_span;  // Both Stage 1 and Stage 2 partitions
-        final_result.intermediate_data = 0;  // Not needed for final result
-        final_result.pattern = PARALLEL_CROSS;
-        final_result.is_final_stage = true;
-        snprintf(final_result.error_msg, sizeof(final_result.error_msg), "");
-
-        self->stage2_completed++;
-        self->tasks_processed++;
-        self->total_processing_time_ms += proc_time_ms;
-
-        lf_print("[Worker %d] PARALLEL_CROSS Job #%d completed: %d total records in %ld ms total",
-                 self->worker_id, job_id, final_result.records_processed,
-                 final_result.processing_time_ms);
-        lf_print("[Worker %d]    Sending final result to Reducer\n",
-                 self->worker_id);
-
-        // Send final Stage 2 result to Reducer
-        lf_set(stage2_result, final_result);
-
-        // Remove from pending
-        for (int i = pending_slot; i < self->pending_stage2_count - 1; i++) {
-          self->pending_stage2_jobs[i] = self->pending_stage2_jobs[i + 1];
-        }
-        self->pending_stage2_count--;
-      }
+    if (peer.pattern == PARALLEL_CROSS && self->pending_count > 0) {
+      self->pending_count--;
     }
   =}
 
   reaction(shutdown) {=
-    lf_print("\n[Worker %d] === STATISTICS ===", self->worker_id);
-    lf_print("[Worker %d] Stage 1 completed: %d", self->worker_id, self->stage1_completed);
-    lf_print("[Worker %d] Stage 2 completed: %d", self->worker_id, self->stage2_completed);
-    lf_print("[Worker %d] Total tasks processed: %d", self->worker_id, self->tasks_processed);
-    lf_print("[Worker %d] Tasks failed: %d", self->worker_id, self->tasks_failed);
-    if (self->tasks_processed > 0) {
-      lf_print("[Worker %d] Avg processing time: %ld ms",
-               self->worker_id,
-               self->total_processing_time_ms / self->tasks_processed);
-    }
-    double success_rate = (self->tasks_processed + self->tasks_failed) > 0 ?
-                          (100.0 * self->tasks_processed) / (self->tasks_processed + self->tasks_failed) : 0;
-    lf_print("[Worker %d] Success rate: %.1f%%", self->worker_id, success_rate);
-    if (self->pending_stage2_count > 0) {
-      lf_print("[Worker %d] Pending Stage 2 jobs: %d", self->worker_id, self->pending_stage2_count);
-    }
+    lf_print("[W%d] Processed %d tasks", self->worker_id, self->tasks_processed);
   =}
 }
 
-// Simple wrapper to expose ports expected by the host router.
 reactor WorkerNode(worker_id: int = 1) {
   input stage1_task: map_task_t
   input peer_stage1_result: map_result_t
@@ -418,18 +136,6 @@ reactor WorkerNode(worker_id: int = 1) {
   worker.stage2_result -> stage2_result
 }
 
-federated reactor MapReduceWorker(worker_id: int = 1) {
-  // Ports to connect to the host router.
-  input stage1_task: map_task_t
-  input peer_stage1_result: map_result_t
-  output stage1_result: map_result_t
-  output stage2_result: map_result_t
-
-  @platform_zephyr
+main reactor MapReduceWorker(worker_id: int = 1) {
   worker = new WorkerNode(worker_id=worker_id)
-
-  stage1_task -> worker.stage1_task
-  peer_stage1_result -> worker.peer_stage1_result
-  worker.stage1_result -> stage1_result
-  worker.stage2_result -> stage2_result
 }
