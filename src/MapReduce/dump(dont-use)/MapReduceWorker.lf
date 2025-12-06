@@ -101,11 +101,18 @@ reactor Worker(worker_id: int = 1, base_processing_ms: int = 100) {
     lf_print("[W%d] S2 J%d", self->worker_id, peer.job_id);
     lf_sleep(proc_time_ms * MSEC(1));
 
+    // For SEQUENTIAL: combine stage1 + stage2 processing time
+    // For PARALLEL_CROSS: just stage2 time (reducer will aggregate)
+    long total_proc_time = proc_time_ms;
+    if (peer.pattern == SEQUENTIAL) {
+      total_proc_time = peer.processing_time_ms + proc_time_ms;
+    }
+
     map_result_t result;
     result.job_id = peer.job_id;
     result.worker_id = self->worker_id;
     result.pattern = peer.pattern;
-    result.processing_time_ms = proc_time_ms;
+    result.processing_time_ms = total_proc_time;
     result.succeeded = peer.succeeded;
     snprintf(result.log, sizeof(result.log), "Stage2 complete: %ld ms", proc_time_ms);
 
