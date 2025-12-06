@@ -1,5 +1,7 @@
 // How to compute WCET if there are parallel paths?
-target C
+target C {
+    platform: "FlexPRET",
+}
 
 reactor Clock {
     output tick:int
@@ -61,12 +63,19 @@ reactor Timer_Start {
 }
 
 reactor Time_Elapsed_Calculator {
-    output time_elapsed:instant_t
     input start_time:instant_t
     input end_time:instant_t
-    reaction(start_time, end_time) -> time_elapsed {=
-        instant_t elapsed = end_time-start_time;
-        lf_set(time_elapsed, elapsed);
+    state saved_start_time:instant_t = -1
+    
+    reaction(start_time) {=
+        self->saved_start_time = start_time->value;
+    =}
+    
+    reaction(end_time) {=
+        if (self->saved_start_time >= 0) {
+            instant_t elapsed = end_time->value - self->saved_start_time;
+            lf_print("Time elapsed = %d ns", (int)elapsed);
+        }
     =}
 }
 
@@ -86,8 +95,4 @@ main reactor {
     p.out2 -> a.in2
     t.start_time -> calc.start_time
     a.end_time -> calc.end_time
-    reaction(calc.time_elapsed) {=
-        lf_print("Time elapsed = %lld", calc.time_elapsed->value);
-    =}
 }
-
