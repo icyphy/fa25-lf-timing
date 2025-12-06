@@ -74,10 +74,6 @@ preamble {=
     char log[128];
   } map_result_t;
 
-  static inline long current_time_ms() {
-    return lf_time_physical() / MSEC(1);
-  }
-
   static inline int random_range(int min, int max) {
     return min + (rand() % (max - min + 1));
   }
@@ -100,7 +96,7 @@ reactor Client(min_interval: time = 2 sec, max_interval: time = 3 sec) {
   reaction(submit_job) -> out, submit_job {=
     map_task_t task;
     task.job_id = self->job_counter++;
-    task.start_time = current_time_ms();
+    task.start_time = lf_time_physical() / MSEC(1);
 
     int pattern_type = rand() % 3;
     task.pattern = (processing_pattern_t)pattern_type;
@@ -131,7 +127,7 @@ reactor Scheduler {
   state jobs_scheduled: int = 0
 
   reaction(in) -> to_worker1, to_worker2 {=
-    if (!in->is_present) return;
+    if (lf_is_present(in)) return;
     map_task_t task = in->value;
 
     if (task.pattern == SINGLE_NODE) {
@@ -177,12 +173,12 @@ reactor Reducer {
   reaction(from_worker1, from_worker2) {=
     map_result_t* results[2] = {NULL, NULL};
 
-    if (from_worker1->is_present) {
+    if (lf_is_present(from_worker1)) {
       static map_result_t r1;
       r1 = from_worker1->value;
       results[0] = &r1;
     }
-    if (from_worker2->is_present) {
+    if (lf_is_present(from_worker2)) {
       static map_result_t r2;
       r2 = from_worker2->value;
       results[1] = &r2;
@@ -275,42 +271,42 @@ reactor RouterNode {
   state messages_routed: int = 0
 
   reaction(from_master_w1) -> to_worker1_task {=
-    if (from_master_w1->is_present) {
+    if (lf_is_present(from_master_w1)) {
       lf_set(to_worker1_task, from_master_w1->value);
       self->messages_routed++;
     }
   =}
 
   reaction(from_master_w2) -> to_worker2_task {=
-    if (from_master_w2->is_present) {
+    if (lf_is_present(from_master_w2)) {
       lf_set(to_worker2_task, from_master_w2->value);
       self->messages_routed++;
     }
   =}
 
   reaction(from_worker1_stage1) -> to_worker2_peer {=
-    if (from_worker1_stage1->is_present) {
+    if (lf_is_present(from_worker1_stage1)) {
       lf_set(to_worker2_peer, from_worker1_stage1->value);
       self->messages_routed++;
     }
   =}
 
   reaction(from_worker2_stage1) -> to_worker1_peer {=
-    if (from_worker2_stage1->is_present) {
+    if (lf_is_present(from_worker2_stage1)) {
       lf_set(to_worker1_peer, from_worker2_stage1->value);
       self->messages_routed++;
     }
   =}
 
   reaction(from_worker1_stage2) -> to_reducer_w1 {=
-    if (from_worker1_stage2->is_present) {
+    if (lf_is_present(from_worker1_stage2)) {
       lf_set(to_reducer_w1, from_worker1_stage2->value);
       self->messages_routed++;
     }
   =}
 
   reaction(from_worker2_stage2) -> to_reducer_w2 {=
-    if (from_worker2_stage2->is_present) {
+    if (lf_is_present(from_worker2_stage2)) {
       lf_set(to_reducer_w2, from_worker2_stage2->value);
       self->messages_routed++;
     }
@@ -335,7 +331,7 @@ reactor Worker(worker_id: int = 1, base_processing_ms: int = 100) {
   state pending_count: int = 0
 
   reaction(stage1_task) -> stage1_result, stage2_result {=
-    if (!stage1_task->is_present) return;
+    if (!lf_is_present(stage1_task)) return;
     map_task_t task = stage1_task->value;
 
     long proc_time_ms = self->base_processing_ms + random_range(-20, 50);
@@ -364,7 +360,7 @@ reactor Worker(worker_id: int = 1, base_processing_ms: int = 100) {
   =}
 
   reaction(peer_stage1_result) -> stage2_result {=
-    if (!peer_stage1_result->is_present) return;
+    if (!lf_is_present(peer_stage1_result)) return;
     map_result_t peer = peer_stage1_result->value;
 
     long proc_time_ms = self->base_processing_ms + random_range(-20, 50);
@@ -482,8 +478,8 @@ reactor Worker2Federate {
 
 federated reactor {
   // Host federate (PC/Linux - uses C target via platform annotation)
-  @interface_tcp(name="host_if", address="192.168.1.100")
-  @platform_linux
+  @interface_tcp(name="host_if", address="10.0.0.20")
+  @platform_native
   host = new HostFederate()
 
   // Worker1 federate (Microcontroller - uses uC/Zephyr)
