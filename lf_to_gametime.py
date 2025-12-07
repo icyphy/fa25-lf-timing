@@ -494,19 +494,29 @@ class LFToGameTimeConverter:
             f.write("#define SEC(t)  ((interval_t)((t) * 1000000000LL))\n")
             f.write("\n")
             
-            # Add __gt_delay_for stub for KLEE compatibility
-            # Using __gt_delay_for to avoid macro conflict with FlexPRET SDK's fp_delay_for
-            # For KLEE: simple stub that preserves code structure
-            # For FlexPRET: the real timing is handled by FlexPRET SDK
+            # Add __gt_delay_for with rdtime wrapper per Solution #1 from screenshot
+            # Uses #ifdef __KLEE__ to conditionally compile for KLEE vs FlexPRET
             if '__gt_delay_for' in code:
-                f.write("// GameTime delay stub - avoids conflict with FlexPRET SDK fp_delay_for macro\n")
-                f.write("// For KLEE: simple stub that allows symbolic execution\n")
-                f.write("// For FlexPRET: timing overhead is minimal (just function call)\n")
+                f.write("// Solution #1: Wrap rdtime in a normal C function for KLEE compatibility\n")
+                f.write("#ifdef __KLEE__\n")
+                f.write("uint64_t klee_any_uint64_t(void);\n")
+                f.write("static inline uint64_t __gt_get_rdtime(void) {\n")
+                f.write("    return klee_any_uint64_t();\n")
+                f.write("}\n")
+                f.write("#else\n")
+                f.write("static inline uint64_t read_time_hw(void) {\n")
+                f.write("    uint64_t t;\n")
+                f.write("    asm volatile(\"rdtime %0\" : \"=r\"(t));\n")
+                f.write("    return t;\n")
+                f.write("}\n")
+                f.write("static inline uint64_t __gt_get_rdtime(void) {\n")
+                f.write("    return read_time_hw();\n")
+                f.write("}\n")
+                f.write("#endif\n\n")
                 f.write("static inline void __gt_delay_for(interval_t ns) {\n")
-                f.write("    // Stub: actual delay not executed during analysis\n")
-                f.write("    // The ns parameter is kept to preserve code structure for path analysis\n")
-                f.write("    volatile interval_t __delay_ns = ns;\n")
-                f.write("    (void)__delay_ns;  // Suppress unused variable warning\n")
+                f.write("    uint64_t start = __gt_get_rdtime();\n")
+                f.write("    uint64_t target = start + (uint64_t)ns;\n")
+                f.write("    while (__gt_get_rdtime() < target) { }\n")
                 f.write("}\n\n")
 
             # Add preamble if present (includes custom types like 'packet')
@@ -717,11 +727,27 @@ class LFToGameTimeConverter:
             f.write("#define MSEC(t) ((interval_t)((t) * 1000000LL))\n")
             f.write("#define SEC(t)  ((interval_t)((t) * 1000000000LL))\n\n")
             
-            # Add __gt_delay_for stub for KLEE compatibility (avoids FlexPRET SDK macro conflict)
-            f.write("// GameTime delay stub - avoids conflict with FlexPRET SDK fp_delay_for macro\n")
+            # Add __gt_delay_for with rdtime wrapper (Solution #1 - exact implementation)
+            f.write("// Solution #1: Wrap rdtime in a normal C function for KLEE compatibility\n")
+            f.write("#ifdef __KLEE__\n")
+            f.write("uint64_t klee_any_uint64_t(void);\n")
+            f.write("static inline uint64_t __gt_get_rdtime(void) {\n")
+            f.write("    return klee_any_uint64_t();\n")
+            f.write("}\n")
+            f.write("#else\n")
+            f.write("static inline uint64_t read_time_hw(void) {\n")
+            f.write("    uint64_t t;\n")
+            f.write("    asm volatile(\"rdtime %0\" : \"=r\"(t));\n")
+            f.write("    return t;\n")
+            f.write("}\n")
+            f.write("static inline uint64_t __gt_get_rdtime(void) {\n")
+            f.write("    return read_time_hw();\n")
+            f.write("}\n")
+            f.write("#endif\n\n")
             f.write("static inline void __gt_delay_for(interval_t ns) {\n")
-            f.write("    volatile interval_t __delay_ns = ns;\n")
-            f.write("    (void)__delay_ns;\n")
+            f.write("    uint64_t start = __gt_get_rdtime();\n")
+            f.write("    uint64_t target = start + (uint64_t)ns;\n")
+            f.write("    while (__gt_get_rdtime() < target) { }\n")
             f.write("}\n\n")
             
             # Add preamble if present
