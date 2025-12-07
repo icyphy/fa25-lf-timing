@@ -1,5 +1,6 @@
 target C {
-    timeout: 5 sec
+    timeout: 5 sec,
+    platform: "FlexPRET"
 }
 
 preamble {=
@@ -22,18 +23,63 @@ preamble {=
     }
 =}
 
+// Timer to trigger the measurement cycle
+reactor Clock {
+    output tick:int
+    timer t(500ms, 1s)
+    reaction(t) -> tick {=
+        lf_set_present(tick);
+    =}
+}
+
+// Records start time when triggered
+reactor Timer_Start {
+    input tick:int
+    output start_time:instant_t
+    reaction(tick) -> start_time {=
+        instant_t t = lf_time_physical_elapsed();
+        lf_set(start_time, t);
+    =}
+}
+
+// Calculates elapsed time between start and end
+reactor Time_Elapsed_Calculator {
+    input start_time:instant_t
+    input end_time:instant_t
+    state saved_start_time:instant_t = -1
+    
+    reaction(start_time) {=
+        self->saved_start_time = start_time->value;
+    =}
+    
+    reaction(end_time) {=
+        if (self->saved_start_time >= 0) {
+            instant_t elapsed = end_time->value - self->saved_start_time;
+            lf_print("Round-trip time elapsed = %d ns", (int)elapsed);
+            self->saved_start_time = -1;  // Reset for next measurement
+        }
+    =}
+}
+
 reactor Client(period: time = 1 sec) {
     timer t(0, period)
     state id: int = 0
 
     input inp: packet
     output outp: packet
+    output start_time:instant_t   // Time at START of reaction 1 (timer)
+    output end_time:instant_t     // Time at END of reaction 2 (inp handler)
     
     reaction(startup) {=
         srand(time(NULL));
     =}
 
-    reaction(t) -> outp {=
+    // Reaction 1: Timer fires, send SYN packet
+    reaction(t) -> outp, start_time {=
+        // Record time at START of this reaction
+        instant_t now = lf_time_physical_elapsed();
+        lf_set(start_time, now);
+        
         packet *p = malloc(sizeof(packet));
         p->id = self->id++;
         p->seq = 0;
@@ -41,7 +87,8 @@ reactor Client(period: time = 1 sec) {
         lf_set(outp, *p);
     =}
 
-    reaction(inp) -> outp {=
+    // Reaction 2: Receive response from server
+    reaction(inp) -> outp, end_time {=
         packet *in = &inp->value;
         packet *out = malloc(sizeof(packet));
         out->id = in->id;
@@ -60,6 +107,10 @@ reactor Client(period: time = 1 sec) {
         lf_sleep(MSEC(randint(40, 60))); // simulate processing + connection delay
         if (send)
             lf_set(outp, *out);
+        
+        // Record time at END of this reaction
+        instant_t now = lf_time_physical_elapsed();
+        lf_set(end_time, now);
     =}
 }
 
@@ -105,6 +156,15 @@ reactor Server(refresh: time = 20 msec) {
 main reactor TCP2 {
     c = new Client()
     s = new Server()
+    calc = new Time_Elapsed_Calculator()
+    
+    // TCP connections
     c.outp -> s.inp after 50 msec
     s.outp -> c.inp after 50 msec
+    
+    // Timing measurement: 
+    // start_time = START of client reaction 1 (timer fires)
+    // end_time = END of client reaction 2 (after processing server response)
+    c.start_time -> calc.start_time
+    c.end_time -> calc.end_time
 }
