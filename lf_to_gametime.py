@@ -397,9 +397,9 @@ class LFToGameTimeConverter:
         code = re.sub(r'lf_tag\s*\(\s*\)\.microstep', '__symbolic_microstep', code)
         code = re.sub(r'lf_tag\s*\(\s*\)', '((tag_t){__symbolic_logical_time, __symbolic_microstep})', code)
         
-        # Replace lf_sleep with fp_delay_for (FlexPRET native timing function)
-        # This is stubbed for GameTime analysis - real timing not measured
-        code = re.sub(r'lf_sleep\s*\(\s*([^)]+)\s*\)', r'fp_delay_for(\1)', code)
+        # Replace lf_sleep with __gt_delay_for (GameTime delay stub)
+        # Using __gt_delay_for to avoid macro conflict with FlexPRET SDK's fp_delay_for
+        code = re.sub(r'lf_sleep\s*\(\s*([^)]+)\s*\)', r'__gt_delay_for(\1)', code)
 
         # Replace lf_schedule with scheduling flag/counter to preserve execution path cost
         def replace_schedule(match):
@@ -494,28 +494,19 @@ class LFToGameTimeConverter:
             f.write("#define SEC(t)  ((interval_t)((t) * 1000000000LL))\n")
             f.write("\n")
             
-            # Add rdtime wrapper and fp_delay_for stub for KLEE compatibility
-            # Solution: Wrap rdtime in a normal C function that KLEE can stub
-            # For KLEE: returns symbolic value allowing path exploration
-            # For FlexPRET: real implementation uses RISC-V rdtime instruction
-            if 'fp_delay_for' in code:
-                f.write("// rdtime wrapper - KLEE stub version\n")
-                f.write("// Wraps RISC-V rdtime instruction in a normal C function\n")
-                f.write("// KLEE cannot execute inline assembly, so we return a symbolic-friendly value\n")
-                f.write("static inline uint64_t get_rdtime(void) {\n")
-                f.write("    // For KLEE: this becomes a symbolic value via klee_make_symbolic\n")
-                f.write("    // For FlexPRET measurement: replaced with real rdtime in driver.c\n")
-                f.write("    static uint64_t __klee_rdtime_counter = 0;\n")
-                f.write("    return __klee_rdtime_counter++;\n")
-                f.write("}\n\n")
-                f.write("// fp_delay_for stub using get_rdtime wrapper\n")
-                f.write("// Preserves timing loop structure for accurate WCET path analysis\n")
-                f.write("static inline void fp_delay_for(interval_t ns) {\n")
-                f.write("    uint64_t start = get_rdtime();\n")
-                f.write("    uint64_t target = start + (uint64_t)ns;  // Simplified: assume 1 tick = 1 ns\n")
-                f.write("    while (get_rdtime() < target) {\n")
-                f.write("        // Busy wait - loop overhead measured by FlexPRET\n")
-                f.write("    }\n")
+            # Add __gt_delay_for stub for KLEE compatibility
+            # Using __gt_delay_for to avoid macro conflict with FlexPRET SDK's fp_delay_for
+            # For KLEE: simple stub that preserves code structure
+            # For FlexPRET: the real timing is handled by FlexPRET SDK
+            if '__gt_delay_for' in code:
+                f.write("// GameTime delay stub - avoids conflict with FlexPRET SDK fp_delay_for macro\n")
+                f.write("// For KLEE: simple stub that allows symbolic execution\n")
+                f.write("// For FlexPRET: timing overhead is minimal (just function call)\n")
+                f.write("static inline void __gt_delay_for(interval_t ns) {\n")
+                f.write("    // Stub: actual delay not executed during analysis\n")
+                f.write("    // The ns parameter is kept to preserve code structure for path analysis\n")
+                f.write("    volatile interval_t __delay_ns = ns;\n")
+                f.write("    (void)__delay_ns;  // Suppress unused variable warning\n")
                 f.write("}\n\n")
 
             # Add preamble if present (includes custom types like 'packet')
@@ -726,17 +717,11 @@ class LFToGameTimeConverter:
             f.write("#define MSEC(t) ((interval_t)((t) * 1000000LL))\n")
             f.write("#define SEC(t)  ((interval_t)((t) * 1000000000LL))\n\n")
             
-            # Add rdtime wrapper and fp_delay_for for KLEE compatibility
-            f.write("// rdtime wrapper - KLEE stub version\n")
-            f.write("static inline uint64_t get_rdtime(void) {\n")
-            f.write("    static uint64_t __klee_rdtime_counter = 0;\n")
-            f.write("    return __klee_rdtime_counter++;\n")
-            f.write("}\n\n")
-            f.write("// fp_delay_for using get_rdtime wrapper\n")
-            f.write("static inline void fp_delay_for(interval_t ns) {\n")
-            f.write("    uint64_t start = get_rdtime();\n")
-            f.write("    uint64_t target = start + (uint64_t)ns;\n")
-            f.write("    while (get_rdtime() < target) { }\n")
+            # Add __gt_delay_for stub for KLEE compatibility (avoids FlexPRET SDK macro conflict)
+            f.write("// GameTime delay stub - avoids conflict with FlexPRET SDK fp_delay_for macro\n")
+            f.write("static inline void __gt_delay_for(interval_t ns) {\n")
+            f.write("    volatile interval_t __delay_ns = ns;\n")
+            f.write("    (void)__delay_ns;\n")
             f.write("}\n\n")
             
             # Add preamble if present
