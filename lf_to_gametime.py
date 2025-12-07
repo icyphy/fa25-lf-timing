@@ -21,7 +21,6 @@ import sys
 from pathlib import Path
 from typing import Dict, List, Tuple, Optional
 
-## TODO: lf_sleep() transformation to fp_delay_for() not fully fixed. Add wrapper function to properly handle timing in GameTime analysis."
 
 #TODO: Network latency
 
