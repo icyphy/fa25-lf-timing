@@ -1,0 +1,20 @@
+BINARY_DIR/external/printf/CMakeFiles/printf.dir/src/printf/printf.c.obj: \
+ /home/flexpret/sdk/external/printf/src/printf/printf.c \
+ /home/gametime/test/lf-gametime-TCP2/server_reaction_function_0_analysis/server_reaction_function_0gt/path1/Flexpret/build/BINARY_DIR/external/printf/include/printf_config.h \
+ /home/flexpret/sdk/external/printf/src/printf/printf.h \
+ /opt/xpack-riscv-none-elf-gcc-14.2.0-2/lib/gcc/riscv-none-elf/14.2.0/include/stdarg.h \
+ /opt/xpack-riscv-none-elf-gcc-14.2.0-2/lib/gcc/riscv-none-elf/14.2.0/include/stddef.h \
+ /opt/xpack-riscv-none-elf-gcc-14.2.0-2/lib/gcc/riscv-none-elf/14.2.0/include/stdint.h \
+ /opt/xpack-riscv-none-elf-gcc-14.2.0-2/riscv-none-elf/include/stdint.h \
+ /opt/xpack-riscv-none-elf-gcc-14.2.0-2/riscv-none-elf/include/machine/_default_types.h \
+ /opt/xpack-riscv-none-elf-gcc-14.2.0-2/riscv-none-elf/include/sys/features.h \
+ /opt/xpack-riscv-none-elf-gcc-14.2.0-2/riscv-none-elf/include/_newlib_version.h \
+ /opt/xpack-riscv-none-elf-gcc-14.2.0-2/riscv-none-elf/include/sys/_intsup.h \
+ /opt/xpack-riscv-none-elf-gcc-14.2.0-2/riscv-none-elf/include/sys/_stdint.h \
+ /opt/xpack-riscv-none-elf-gcc-14.2.0-2/lib/gcc/riscv-none-elf/14.2.0/include/limits.h \
+ /opt/xpack-riscv-none-elf-gcc-14.2.0-2/lib/gcc/riscv-none-elf/14.2.0/include/syslimits.h \
+ /opt/xpack-riscv-none-elf-gcc-14.2.0-2/riscv-none-elf/include/limits.h \
+ /opt/xpack-riscv-none-elf-gcc-14.2.0-2/riscv-none-elf/include/newlib.h \
+ /opt/xpack-riscv-none-elf-gcc-14.2.0-2/riscv-none-elf/include/sys/cdefs.h \
+ /opt/xpack-riscv-none-elf-gcc-14.2.0-2/riscv-none-elf/include/sys/syslimits.h \
+ /opt/xpack-riscv-none-elf-gcc-14.2.0-2/lib/gcc/riscv-none-elf/14.2.0/include/stdbool.h

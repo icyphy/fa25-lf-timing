@@ -1,0 +1,29 @@
+ktest file : '/home/gametime/test/lf-gametime-TCP2/server_reaction_function_0_analysis/server_reaction_function_0gt/feasible-path3/klee-last/test000001.ktest'
+args       : ['/home/gametime/test/lf-gametime-TCP2/server_reaction_function_0_analysis/server_reaction_function_0gt/feasible-path3/server_reaction_function_0_klee_format_linked_inlined_mod_unrolled_mod_gvMod.bc']
+num objects: 4
+object 0: name: 'refresh_val'
+object 0: size: 8
+object 0: data: b'\x00\x00\x00\x00\x00\x00\x00\x00'
+object 0: hex : 0x0000000000000000
+object 0: int : 0
+object 0: uint: 0
+object 0: text: ........
+object 1: name: '__symbolic_elapsed_time'
+object 1: size: 8
+object 1: data: b'\x00\x00\x00\x00\x00\x00\x00\x00'
+object 1: hex : 0x0000000000000000
+object 1: int : 0
+object 1: uint: 0
+object 1: text: ........
+object 2: name: '__symbolic_microstep'
+object 2: size: 4
+object 2: data: b'\x00\x00\x00\x00'
+object 2: hex : 0x00000000
+object 2: int : 0
+object 2: uint: 0
+object 2: text: ....
+object 3: name: 'inp'
+object 3: size: 12
+object 3: data: b'\x00\x00\x00\x00\x00\x00\x00\x00\x02\x00\x00\x00'
+object 3: hex : 0x000000000000000002000000
+object 3: text: ............
