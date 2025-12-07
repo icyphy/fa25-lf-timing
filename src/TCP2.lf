@@ -102,7 +102,7 @@ reactor Server(refresh: time = 20 msec) {
     =}
 }
 
-reactor TCP2 {
+main reactor TCP2 {
     c = new Client()
     s = new Server()
     c.outp -> s.inp after 50 msec
