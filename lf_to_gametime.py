@@ -18,6 +18,7 @@ Examples:
 import os
 import re
 import sys
+import time
 from pathlib import Path
 from typing import Dict, List, Tuple, Optional
 
@@ -350,6 +351,49 @@ class LFToGameTimeConverter:
                                 state_vars: Dict[str, str] = None) -> str:
         """Transform LF reaction code to GameTime-compatible C code, passing state as parameters."""
         code = reaction_body
+        
+        # Auto-detect additional input ports from xxx->value patterns in code
+        # that aren't already in input_ports
+        existing_port_names = {p[0] for p in input_ports}
+        value_pattern = r'(\w+)->value'
+        for match in re.finditer(value_pattern, code):
+            port_name = match.group(1)
+            # Skip if already known, or if it's 'self' or other known non-port
+            if port_name not in existing_port_names and port_name != 'self':
+                # Try to find the type from multiple sources
+                port_type = None
+                
+                # 1. Check reactor's known input ports
+                reactor_inputs = self.input_ports.get(reactor_name, [])
+                for pn, pt in reactor_inputs:
+                    if port_name == pn:
+                        port_type = pt
+                        break
+                
+                # 2. Check output_ports passed to this function
+                if port_type is None:
+                    for pn, pt in output_ports:
+                        if port_name == pn:
+                            port_type = pt
+                            break
+                
+                # 3. Infer from pointer declarations in the code
+                # e.g., "packet *in = &inp->value" means inp is of type packet
+                if port_type is None:
+                    pointer_decl_pattern = rf'(\w+)\s*\*\s*\w+\s*=\s*&{port_name}->value'
+                    ptr_match = re.search(pointer_decl_pattern, code)
+                    if ptr_match:
+                        port_type = ptr_match.group(1)
+                
+                # 4. Default based on name heuristics
+                if port_type is None:
+                    if 'time' in port_name.lower():
+                        port_type = 'instant_t'
+                    else:
+                        port_type = 'int'
+                
+                input_ports.append((port_name, port_type))
+                existing_port_names.add(port_name)
 
         # Remove #line directives
         code = re.sub(r'^\s*#line\s+\d+\s+"[^"]+"\s*$', '', code, flags=re.MULTILINE)
@@ -364,22 +408,40 @@ class LFToGameTimeConverter:
 
         # Track output variables from lf_set calls with their types
         output_vars_with_types = []
+        
+        # Also look for struct pointer declarations to infer types
+        # e.g., "packet *out = malloc..." means *out is of type packet
+        pointer_types = {}
+        pointer_decl_pattern = r'(\w+)\s*\*\s*(\w+)\s*='
+        for match in re.finditer(pointer_decl_pattern, code):
+            ptr_type = match.group(1)
+            ptr_name = match.group(2)
+            pointer_types[ptr_name] = ptr_type
 
         def replace_lf_set(match):
             port = match.group(1)
-            value = match.group(2)
+            value = match.group(2).strip()
             # Find the port type from output_ports
             port_type = 'int'  # default
             for port_name, ptype in output_ports:
                 if port == port_name:
                     port_type = ptype
                     break
+            # If still default and value is *ptr, check pointer_types
+            if port_type == 'int' and value.startswith('*'):
+                ptr_name = value[1:].strip()
+                if ptr_name in pointer_types:
+                    port_type = pointer_types[ptr_name]
             if port not in [p[0] for p in output_vars_with_types]:
                 output_vars_with_types.append((port, port_type))
             return f'__output_{port} = {value};'
 
         # Replace lf_set(port, value)
         code = re.sub(r'lf_set\s*\(\s*(\w+)\s*,\s*(.+?)\s*\)', replace_lf_set, code)
+
+        # Remove lf_set_present(port) - it just marks a port as present without value
+        # This has no equivalent in the analysis context, so we remove it
+        code = re.sub(r'lf_set_present\s*\(\s*\w+\s*\)\s*;?\s*', '', code)
 
         # Replace LF API calls with symbolic variables for path exploration
         # Instead of constants, use variables that can be made symbolic by KLEE
@@ -412,6 +474,10 @@ class LFToGameTimeConverter:
         # Replace input port->value with port parameter
         for port_name, port_type in input_ports:
             code = re.sub(rf'{port_name}->value', port_name, code)
+        
+        # Generic fallback: Replace any remaining port->value patterns
+        # This handles cases where port detection missed some inputs
+        code = re.sub(r'(\w+)->value', r'\1', code)
 
         # Remove printf calls that cause KLEE symbolic execution issues
         # COMMENTED OUT FOR TESTING - let KLEE handle printf naturally
@@ -982,11 +1048,20 @@ class LFToGameTimeConverter:
                     for trigger in trigger_info.split(','):
                         if trigger.startswith('input:'):
                             port_name = trigger.split(':')[1]
-                            # Find port type
+                            # Find port type - use exact match
+                            found = False
                             for pn, pt in input_ports:
-                                if port_name in pn:
+                                if port_name == pn:
                                     reaction_inputs.append((port_name, pt))
+                                    found = True
                                     break
+                            # Fallback: if not found in input_ports, check all known ports for this reactor
+                            if not found:
+                                all_ports = self.input_ports.get(reactor_name, [])
+                                for pn, pt in all_ports:
+                                    if port_name == pn:
+                                        reaction_inputs.append((port_name, pt))
+                                        break
                 
                 # Transform code for this specific reaction
                 transformed_code, output_vars = self.transform_reaction_code(
@@ -1034,10 +1109,22 @@ def main():
         print(f"Error: Directory {src_gen_dir} does not exist")
         sys.exit(1)
     
+    # Time the conversion process
+    start_time = time.perf_counter()
+    
     converter = LFToGameTimeConverter(src_gen_dir, output_dir)
     results = converter.convert()
     
+    conversion_time = time.perf_counter() - start_time
+    
     print(f"\n✅ Conversion complete!")
+    print(f"\n⏱️  lf_to_gametime conversion time: {conversion_time:.3f} seconds")
+    
+    # Save timing to a file in the output directory
+    timing_file = converter.output_dir / "lf_to_gametime_timing.txt"
+    with open(timing_file, 'w') as f:
+        f.write(f"lf_to_gametime_seconds: {conversion_time:.6f}\n")
+    
     print(f"\n📂 Generated analysis projects:")
     
     for reactor_name, c_file, config_file in results['reactors']:
