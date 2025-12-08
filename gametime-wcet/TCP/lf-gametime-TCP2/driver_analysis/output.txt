@@ -1,0 +1,121 @@
+Reading GameTime configuration in /home/gametime/src/config.yaml.in...
+
+Successfully configured GameTime.
+
+Loading configuration from: lf-gametime-TCP2/driver_analysis/config.yaml
+Successfully loaded project.
+
+Overriding backend with: flexpret
+Cleaning temporary directory: /home/gametime/test/lf-gametime-TCP2/driver_analysis/drivergt
+Creating analyzer...
+==> Executing command: clang -emit-llvm -Xclang -disable-O0-optnone -Wno-implicit-function-declaration -I/usr/local/include -I/usr/local/include/klee -c /home/gametime/test/lf-gametime-TCP2/driver_analysis/driver.c -o /home/gametime/test/lf-gametime-TCP2/driver_analysis/drivergt/drivergt.bc
+==> Executing command: llvm-dis /home/gametime/test/lf-gametime-TCP2/driver_analysis/drivergt/drivergt.bc -o /home/gametime/test/lf-gametime-TCP2/driver_analysis/drivergt/drivergt.ll
+Preprocessing the file: inlining...
+
+Inlining complete.
+Running: Generating LLVM IR from bitcode /home/gametime/test/lf-gametime-TCP2/driver_analysis/drivergt/drivergt_linked_inlined_mod.bc
+Generating LLVM IR from bitcode /home/gametime/test/lf-gametime-TCP2/driver_analysis/drivergt/drivergt_linked_inlined_mod.bc completed successfully.
+
+Running: Generating LLVM IR from /home/gametime/test/lf-gametime-TCP2/driver_analysis/drivergt/drivergt_linked_inlined_mod.ll
+Generating LLVM IR from /home/gametime/test/lf-gametime-TCP2/driver_analysis/drivergt/drivergt_linked_inlined_mod.ll completed successfully.
+
+Modified LLVM IR code saved to /home/gametime/test/lf-gametime-TCP2/driver_analysis/drivergt/drivergt_linked_inlined_mod_unrolled_mod.ll
+Running: Assemble LLVM IR after unrolling
+Assemble LLVM IR after unrolling completed successfully.
+
+Preprocessing the file: unrolling loops in the code...
+
+Loops in the code have been unrolled.
+Writing '.TCP2_tick.dot'...
+==> Executing command: opt -passes=dot-cfg -S -disable-output /home/gametime/test/lf-gametime-TCP2/driver_analysis/drivergt/drivergt_linked_inlined_mod_unrolled_mod.bc
+Preprocessing complete.
+
+Creating control flow graph (DAG)...
+Generating the DAG and associated information...
+Initializing data structures for special edges...
+Data structures initialized.
+All possible labels extracted.
+Generating basis paths...
+Generating the basis paths...
+
+Initializing the basis matrix...
+Basis matrix initialized to
+[[1.]]
+
+There are a maximum of 1 possible basis paths.
+
+Basis matrix has dimensions 1x1. There is only one path through the function under analysis, which is the only basis path.
+Single node CFD with no edge. Only one possible path.
+Time taken to generate paths: 0.00 seconds.
+Basis paths generated.
+Found 1 basis path(s)
+Measuring basis paths...
+  Basis path 0: None = 0
+Generating additional paths for analysis...
+Generating 10 worst-case feasible paths...
+
+Estimating the weights on the `non-special' edges...
+Weights estimated.
+Generating the list of weights on all_temp_files edges...
+List generated.
+Currently generating path 1...
+So far, 0 candidate paths were found to be unsatisfiable.
+Basis matrix has dimensions 1x1. There is only one path through the function under analysis.
+Finding a candidate path using an integer linear program...
+
+Setting up the integer linear programming problem...
+Creating the variables and adding the constraints...
+Variables created and constraints added.
+Constructing the objective function...
+Objective function constructed.
+Finding the maximum value of the objective function...
+Welcome to the CBC MILP Solver 
+Version: 2.10.10 
+Build Date: Sep 26 2023 
+
+command line - /home/gametime/.venv/lib/python3.10/site-packages/pulp/solverdir/cbc/linux/arm64/cbc /tmp/9d17bcb75afc4e458d919c8e7653d2b8-pulp.mps -max -timeMode elapsed -branch -printingOptions all -solution /tmp/9d17bcb75afc4e458d919c8e7653d2b8-pulp.sol (default strategy 1)
+At line 2 NAME          MODEL
+At line 3 ROWS
+At line 7 COLUMNS
+At line 9 RHS
+At line 12 BOUNDS
+At line 14 ENDATA
+Problem MODEL has 2 rows, 1 columns and 0 elements
+Coin0008I MODEL read with 0 errors
+Option for timeMode changed from cpu to elapsed
+Empty problem - 2 rows, 1 columns and 0 elements
+Empty problem - 2 rows, 1 columns and 0 elements
+Primal infeasible - objective value -0
+PrimalInfeasible objective -0 - 0 iterations time 0.002
+
+Result - Linear relaxation infeasible
+
+Enumerated nodes:           0
+Total iterations:           0
+Time (CPU seconds):         0.00
+Time (Wallclock Seconds):   0.00
+
+Option for printingOptions changed from normal to all
+Total time (CPU seconds):       0.00   (Wallclock seconds):       0.00
+
+Maximum value not found.
+
+Unable to find a new candidate path.
+Time taken to generate paths: 0.01 seconds.
+0 of 10 paths have been generated.
+Generated 0 path(s) for measurement
+Measuring generated paths...
+
+============================================================
+GAMETIME ANALYSIS RESULTS
+============================================================
+Function analyzed: TCP2_tick
+Backend: flexpret
+Number of basis paths: 1
+Number of generated paths: 0
+
+Basis Paths:
+  0: None = 0
+============================================================
+
+Analysis completed successfully!

@@ -1,0 +1,2 @@
+/opt/xpack-riscv-none-elf-gcc-14.2.0-2/bin/riscv-none-elf-ar qc lib/libprintf.a CMakeFiles/printf.dir/src/printf/printf.c.obj
+/opt/xpack-riscv-none-elf-gcc-14.2.0-2/bin/riscv-none-elf-ranlib lib/libprintf.a

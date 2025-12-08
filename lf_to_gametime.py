@@ -21,7 +21,6 @@ import sys
 from pathlib import Path
 from typing import Dict, List, Tuple, Optional
 
-## TODO: lf_sleep() transformation to fp_delay_for() not fully fixed. Add wrapper function to properly handle timing in GameTime analysis."
 
 #TODO: Network latency
 
@@ -68,7 +67,9 @@ class LFToGameTimeConverter:
         possible_locations = [
             Path(f"{self.program_name}.lf"),  # Current directory
             Path.cwd() / f"{self.program_name}.lf",
+            Path.cwd() / "src" / f"{self.program_name}.lf",  # src directory
             self.src_gen_dir.parent / f"{self.program_name}.lf",
+            self.src_gen_dir.parent / "src" / f"{self.program_name}.lf",
         ]
         
         for path in possible_locations:
@@ -81,6 +82,10 @@ class LFToGameTimeConverter:
             lf_file = current / f"{self.program_name}.lf"
             if lf_file.exists():
                 return lf_file
+            # Also check src subdirectory
+            lf_file_src = current / "src" / f"{self.program_name}.lf"
+            if lf_file_src.exists():
+                return lf_file_src
             current = current.parent
         
         return None
@@ -136,6 +141,10 @@ class LFToGameTimeConverter:
         """Extract ALL reaction functions from _*.c file.
         Returns: List of (func_name, reaction_body, reactor_name, trigger_info)
         """
+        # Skip auto-generated delay reactors (created by LF for 'after' clauses)
+        if '_lf_gendelay_' in c_file_path.name:
+            return []
+        
         with open(c_file_path, 'r') as f:
             content = f.read()
         
@@ -353,21 +362,43 @@ class LFToGameTimeConverter:
         code = re.sub(r'_\w+_\w+_t\*\s+\w+\s*=\s*[^;]+;\s*', '', code)
         code = re.sub(r'int\s+\w+_width\s*=\s*[^;]+;\s*', '', code)
 
-        # Track output variables from lf_set calls
-        output_vars = []
+        # Track output variables from lf_set calls with their types
+        output_vars_with_types = []
 
         def replace_lf_set(match):
             port = match.group(1)
             value = match.group(2)
-            output_vars.append(port)
+            # Find the port type from output_ports
+            port_type = 'int'  # default
+            for port_name, ptype in output_ports:
+                if port == port_name:
+                    port_type = ptype
+                    break
+            if port not in [p[0] for p in output_vars_with_types]:
+                output_vars_with_types.append((port, port_type))
             return f'__output_{port} = {value};'
 
         # Replace lf_set(port, value)
         code = re.sub(r'lf_set\s*\(\s*(\w+)\s*,\s*(.+?)\s*\)', replace_lf_set, code)
 
-        # Replace LF API calls
+        # Replace LF API calls with symbolic variables for path exploration
+        # Instead of constants, use variables that can be made symbolic by KLEE
         code = code.replace('lf_print(', 'printf(')
-        code = re.sub(r'lf_time_logical\s*\(\s*\)', '0LL', code)
+        
+        # For timing functions, use symbolic variables to allow path exploration
+        # These will be declared as parameters or global symbolic variables
+        code = re.sub(r'lf_time_logical_elapsed\s*\(\s*\)', '__symbolic_elapsed_time', code)
+        code = re.sub(r'lf_time_physical_elapsed\s*\(\s*\)', '__symbolic_elapsed_time', code)
+        code = re.sub(r'lf_time_logical\s*\(\s*\)', '__symbolic_logical_time', code)
+        code = re.sub(r'lf_time_physical\s*\(\s*\)', '__symbolic_physical_time', code)
+        
+        # Replace lf_tag().microstep with symbolic variable for path diversity
+        code = re.sub(r'lf_tag\s*\(\s*\)\.microstep', '__symbolic_microstep', code)
+        code = re.sub(r'lf_tag\s*\(\s*\)', '((tag_t){__symbolic_logical_time, __symbolic_microstep})', code)
+        
+        # Replace lf_sleep with __gt_delay_for (GameTime delay stub)
+        # Using __gt_delay_for to avoid macro conflict with FlexPRET SDK's fp_delay_for
+        code = re.sub(r'lf_sleep\s*\(\s*([^)]+)\s*\)', r'__gt_delay_for(\1)', code)
 
         # Replace lf_schedule with scheduling flag/counter to preserve execution path cost
         def replace_schedule(match):
@@ -390,7 +421,7 @@ class LFToGameTimeConverter:
         code = re.sub(r'\n\s*\n\s*\n', '\n\n', code)
         code = code.strip()
 
-        return code, output_vars
+        return code, output_vars_with_types
     
     def remove_printf_calls(self, code: str) -> str:
         """Keep printf calls with non-pointer arguments, replace others for KLEE compatibility.
@@ -433,7 +464,7 @@ class LFToGameTimeConverter:
     def generate_reactor_file(self, reactor_name: str, func_name: str, code: str,
                               state_vars: Dict[str, str], 
                               input_ports: List[Tuple[str, str]],
-                              output_vars: List[str]) -> str:
+                              output_vars: List[Tuple[str, str]]) -> str:
         """Generate GameTime C file for a single reactor, passing state as parameters."""
         reactor_dir = self.output_dir / f"{reactor_name}_analysis"
         reactor_dir.mkdir(exist_ok=True)
@@ -445,11 +476,51 @@ class LFToGameTimeConverter:
             f.write("#include <stdbool.h>\n")
             f.write("#include <stdio.h>\n")
             f.write("#include <stdint.h>\n")
-            f.write("#include <stdlib.h>\n\n")
+            f.write("#include <stdlib.h>\n")
+            f.write("\n")
+            
+            # Add LF type definitions
+            f.write("// LF type definitions\n")
+            f.write("typedef int64_t instant_t;\n")
+            f.write("typedef int64_t interval_t;\n")
+            f.write("\n")
+            
+            # Add LF time macros
+            f.write("// LF time macros\n")
+            f.write("#define NSEC(t) ((interval_t)(t))\n")
+            f.write("#define USEC(t) ((interval_t)((t) * 1000LL))\n")
+            f.write("#define MSEC(t) ((interval_t)((t) * 1000000LL))\n")
+            f.write("#define SEC(t)  ((interval_t)((t) * 1000000000LL))\n")
+            f.write("\n")
+            
+            # Add __gt_delay_for with rdtime wrapper per Solution #1 from screenshot
+            # Uses #ifdef __KLEE__ to conditionally compile for KLEE vs FlexPRET
+            if '__gt_delay_for' in code:
+                f.write("// Solution #1: Wrap rdtime in a normal C function for KLEE compatibility\n")
+                f.write("#ifdef __KLEE__\n")
+                f.write("uint64_t klee_any_uint64_t(void);\n")
+                f.write("static inline uint64_t __gt_get_rdtime(void) {\n")
+                f.write("    return klee_any_uint64_t();\n")
+                f.write("}\n")
+                f.write("#else\n")
+                f.write("static inline uint64_t read_time_hw(void) {\n")
+                f.write("    uint64_t t;\n")
+                f.write("    asm volatile(\"rdtime %0\" : \"=r\"(t));\n")
+                f.write("    return t;\n")
+                f.write("}\n")
+                f.write("static inline uint64_t __gt_get_rdtime(void) {\n")
+                f.write("    return read_time_hw();\n")
+                f.write("}\n")
+                f.write("#endif\n\n")
+                f.write("static inline void __gt_delay_for(interval_t ns) {\n")
+                f.write("    uint64_t start = __gt_get_rdtime();\n")
+                f.write("    uint64_t target = start + (uint64_t)ns;\n")
+                f.write("    while (__gt_get_rdtime() < target) { }\n")
+                f.write("}\n\n")
 
-            # Add preamble if present
+            # Add preamble if present (includes custom types like 'packet')
             if self.preamble:
-                f.write("// Preamble from LF file\n")
+                f.write("// Preamble from LF file (custom types and functions)\n")
                 f.write(self.preamble)
                 f.write("\n\n")
 
@@ -463,13 +534,25 @@ class LFToGameTimeConverter:
 
             # Function signature with input ports and state variables as parameters
             has_output = len(output_vars) > 0
-            return_type = 'int' if has_output else 'void'
+            return_type = output_vars[0][1] if has_output else 'void'
 
             params = []
             # Add state variables as pointers so they can be updated
             if state_vars:
                 for var_name, var_type in state_vars.items():
                     params.append(f"{var_type}* {var_name}")
+            
+            # Add symbolic timing variables as parameters (KLEE will make them symbolic)
+            if '__symbolic_elapsed_time' in code:
+                params.append("int64_t __symbolic_elapsed_time")
+            if '__symbolic_logical_time' in code:
+                params.append("int64_t __symbolic_logical_time")
+            if '__symbolic_physical_time' in code:
+                params.append("int64_t __symbolic_physical_time")
+            if '__symbolic_microstep' in code:
+                params.append("unsigned int __symbolic_microstep")
+            
+            # Add input ports
             for port_name, port_type in input_ports:
                 params.append(f"{port_type} {port_name}")
 
@@ -479,8 +562,8 @@ class LFToGameTimeConverter:
 
             # Declare output variable if needed
             if has_output:
-                output_var = output_vars[0]
-                f.write(f"    int __output_{output_var};\n")
+                output_var_name, output_var_type = output_vars[0]
+                f.write(f"    {output_var_type} __output_{output_var_name};\n")
 
             # Write reaction body (indent by 4 spaces)
             for line in code.split('\n'):
@@ -488,27 +571,31 @@ class LFToGameTimeConverter:
                     # Replace state variable usage with pointer dereference
                     # CRITICAL: Add parentheses to fix operator precedence issues
                     # *var++ would mean *(var++) but we want (*var)++
+                    # ALSO: Don't replace struct member access (->var or .var)
                     if state_vars:
                         for var_name in state_vars.keys():
                             # Use a single regex that handles all cases with proper precedence
                             # Matches: var followed by ++, --, any assignment operator, or any other context
                             # Replacement ensures proper parentheses for pointer dereference
+                            # EXCLUDE: ->varname or .varname (struct member access)
                             
                             # Match var followed by operator that needs (*var) on LHS
-                            pattern = rf'\b{var_name}\b(?=\s*(\+\+|--|[-+*/&|^%]?=))'
+                            # Negative lookbehind: (?<![>.]) excludes ->var and .var (check for > or . immediately before)
+                            pattern = rf'(?<![>.])\b{var_name}\b(?=\s*(\+\+|--|[-+*/&|^%]?=))'
                             replacement = f'(*{var_name})'
                             line = re.sub(pattern, replacement, line)
                             
                             # Match remaining var uses (reads, function args, comparisons, etc.)
-                            # Use negative lookbehind to avoid double-replacing
-                            pattern = rf'(?<!\(\*)\b{var_name}\b(?!\s*(\+\+|--|[-+*/&|^%]?=))'
+                            # Exclude: already replaced, struct members (->var, .var)
+                            pattern = rf'(?<![>.\*])\b{var_name}\b(?!\s*(\+\+|--|[-+*/&|^%]?=))'
                             replacement = f'*{var_name}'
                             line = re.sub(pattern, replacement, line)
                     f.write(f"    {line}\n")
 
             # Return output if has output
             if has_output:
-                f.write(f"    return __output_{output_vars[0]};\n")
+                output_var_name = output_vars[0][0]
+                f.write(f"    return __output_{output_var_name};\n")
 
             f.write("}\n")
 
@@ -626,6 +713,41 @@ class LFToGameTimeConverter:
             f.write("#include <stdio.h>\n")
             f.write("#include <stdint.h>\n")
             f.write("#include <stdlib.h>\n\n")
+            
+            # Add LF type definitions
+            f.write("// LF type definitions\n")
+            f.write("typedef int64_t instant_t;\n")
+            f.write("typedef int64_t interval_t;\n\n")
+            
+            # Add LF time macros
+            f.write("// LF time macros\n")
+            f.write("#define NSEC(t) ((interval_t)(t))\n")
+            f.write("#define USEC(t) ((interval_t)((t) * 1000LL))\n")
+            f.write("#define MSEC(t) ((interval_t)((t) * 1000000LL))\n")
+            f.write("#define SEC(t)  ((interval_t)((t) * 1000000000LL))\n\n")
+            
+            # Add __gt_delay_for with rdtime wrapper (Solution #1 - exact implementation)
+            f.write("// Solution #1: Wrap rdtime in a normal C function for KLEE compatibility\n")
+            f.write("#ifdef __KLEE__\n")
+            f.write("uint64_t klee_any_uint64_t(void);\n")
+            f.write("static inline uint64_t __gt_get_rdtime(void) {\n")
+            f.write("    return klee_any_uint64_t();\n")
+            f.write("}\n")
+            f.write("#else\n")
+            f.write("static inline uint64_t read_time_hw(void) {\n")
+            f.write("    uint64_t t;\n")
+            f.write("    asm volatile(\"rdtime %0\" : \"=r\"(t));\n")
+            f.write("    return t;\n")
+            f.write("}\n")
+            f.write("static inline uint64_t __gt_get_rdtime(void) {\n")
+            f.write("    return read_time_hw();\n")
+            f.write("}\n")
+            f.write("#endif\n\n")
+            f.write("static inline void __gt_delay_for(interval_t ns) {\n")
+            f.write("    uint64_t start = __gt_get_rdtime();\n")
+            f.write("    uint64_t target = start + (uint64_t)ns;\n")
+            f.write("    while (__gt_get_rdtime() < target) { }\n")
+            f.write("}\n\n")
             
             # Add preamble if present
             if self.preamble:
