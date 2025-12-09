@@ -1,0 +1,226 @@
+/**
+ * RTT (Round-Trip Time) Latency Measurement for Federated Microcontrollers
+ *
+ * This program measures the round-trip network latency between two Zephyr-based
+ * microcontrollers communicating over TCP/IP.
+ *
+ * Architecture:
+ * =============
+ * Federate 0 (Initiator): Sends ping messages and measures RTT
+ * Federate 1 (Responder): Echoes messages back immediately
+ *
+ * Network Configuration:
+ * ======================
+ * Initiator: 192.168.1.100
+ * Responder: 192.168.1.101
+ *
+ * TCP Ports:
+ * - Initiator → Responder: 9000
+ * - Responder → Initiator: 9001
+ *
+ * Measurement Method:
+ * ===================
+ * 1. Initiator sends timestamp at logical time T
+ * 2. Message travels to Responder (network delay + processing)
+ * 3. Responder echoes back at its local logical time
+ * 4. Initiator receives echo and calculates physical RTT
+ * 5. Statistics: min, max, avg, jitter
+ */
+target uC {
+  platform: Zephyr,
+  timeout: 30 sec
+}
+
+preamble {=
+  #include <stdlib.h>
+=}
+
+// ============================================================================
+// INITIATOR: Sends Pings and Measures RTT
+// ============================================================================
+
+reactor Initiator(interval: time = 1 sec) {
+  output ping: int
+  input pong: int
+
+  timer send_ping(500 msec, interval)
+
+  state ping_count: int = 0
+  state pong_count: int = 0
+  state send_times: instant_t[200]
+
+  // Statistics
+  state total_rtt_us: long = 0
+  state min_rtt_us: long = 2147483647
+  state max_rtt_us: long = 0
+  state rtt_samples: long[200]
+  state sample_count: int = 0
+
+  reaction(send_ping) -> ping {=
+    instant_t now = lf_time_physical();
+
+    if (self->ping_count < 200) {
+      self->send_times[self->ping_count] = now;
+    }
+
+    lf_print("(%lld, %d) [Init] Ping #%d sent, physical time %lld ms",
+        lf_time_logical_elapsed() / MSEC(1), lf_tag().microstep,
+        self->ping_count,
+        lf_time_physical_elapsed() / MSEC(1));
+
+    lf_set(ping, self->ping_count);
+    self->ping_count++;
+  =}
+
+  reaction(pong) {=
+    instant_t now = lf_time_physical();
+    int seq = pong->value;
+
+    if (seq >= 0 && seq < 200) {
+      instant_t send_time = self->send_times[seq];
+      long rtt_us = (now - send_time) / USEC(1);
+
+      lf_print("(%lld, %d) [Init] Pong #%d received, RTT=%ld us, physical time %lld ms",
+          lf_time_logical_elapsed() / MSEC(1), lf_tag().microstep,
+          seq, rtt_us,
+          lf_time_physical_elapsed() / MSEC(1));
+
+      // Update statistics
+      self->total_rtt_us += rtt_us;
+      if (rtt_us < self->min_rtt_us) self->min_rtt_us = rtt_us;
+      if (rtt_us > self->max_rtt_us) self->max_rtt_us = rtt_us;
+
+      if (self->sample_count < 200) {
+        self->rtt_samples[self->sample_count] = rtt_us;
+        self->sample_count++;
+      }
+
+      self->pong_count++;
+    }
+  =}
+
+  reaction(shutdown) {=
+    lf_print("(%lld, %d) [Init] ===== RTT MEASUREMENT RESULTS =====",
+        lf_time_logical_elapsed() / MSEC(1), lf_tag().microstep);
+    lf_print("(%lld, %d) [Init] Pings sent: %d, Pongs received: %d",
+        lf_time_logical_elapsed() / MSEC(1), lf_tag().microstep,
+        self->ping_count, self->pong_count);
+
+    if (self->pong_count > 0) {
+      long avg_rtt_us = self->total_rtt_us / self->pong_count;
+
+      // Calculate jitter (standard deviation approximation using simple variance)
+      long variance = 0;
+      for (int i = 0; i < self->sample_count; i++) {
+        long diff = self->rtt_samples[i] - avg_rtt_us;
+        variance += (diff * diff) / self->sample_count;
+      }
+      long jitter_us = 0;
+      // Simple integer square root approximation
+      if (variance > 0) {
+        long x = variance;
+        long y = (x + 1) / 2;
+        while (y < x) {
+          x = y;
+          y = (x + variance / x) / 2;
+        }
+        jitter_us = x;
+      }
+
+      lf_print("(%lld, %d) [Init] Min RTT: %ld us (%.3f ms)",
+          lf_time_logical_elapsed() / MSEC(1), lf_tag().microstep,
+          self->min_rtt_us, self->min_rtt_us / 1000.0);
+      lf_print("(%lld, %d) [Init] Avg RTT: %ld us (%.3f ms)",
+          lf_time_logical_elapsed() / MSEC(1), lf_tag().microstep,
+          avg_rtt_us, avg_rtt_us / 1000.0);
+      lf_print("(%lld, %d) [Init] Max RTT: %ld us (%.3f ms)",
+          lf_time_logical_elapsed() / MSEC(1), lf_tag().microstep,
+          self->max_rtt_us, self->max_rtt_us / 1000.0);
+      lf_print("(%lld, %d) [Init] Jitter: ~%ld us (%.3f ms)",
+          lf_time_logical_elapsed() / MSEC(1), lf_tag().microstep,
+          jitter_us, jitter_us / 1000.0);
+      lf_print("(%lld, %d) [Init] Packet loss: %d%%",
+          lf_time_logical_elapsed() / MSEC(1), lf_tag().microstep,
+          ((self->ping_count - self->pong_count) * 100) / self->ping_count);
+    }
+  =}
+}
+
+// ============================================================================
+// RESPONDER: Echoes Messages Back
+// ============================================================================
+
+reactor Responder {
+  input ping: int
+  output pong: int
+
+  state echo_count: int = 0
+
+  reaction(ping) -> pong {=
+    int seq = ping->value;
+
+    lf_print("(%lld, %d) [Resp] Ping #%d received, echoing back, physical time %lld ms",
+        lf_time_logical_elapsed() / MSEC(1), lf_tag().microstep,
+        seq,
+        lf_time_physical_elapsed() / MSEC(1));
+
+    lf_set(pong, seq);
+    self->echo_count++;
+  =}
+
+  reaction(shutdown) {=
+    lf_print("(%lld, %d) [Resp] Echoed %d messages",
+        lf_time_logical_elapsed() / MSEC(1), lf_tag().microstep,
+        self->echo_count);
+  =}
+}
+
+// ============================================================================
+// FEDERATE REACTORS
+// ============================================================================
+
+reactor InitiatorFederate {
+  output to_responder: int
+  input from_responder: int
+
+  init = new Initiator()
+
+  init.ping -> to_responder
+  from_responder -> init.pong
+}
+
+reactor ResponderFederate {
+  input from_initiator: int
+  output to_initiator: int
+
+  resp = new Responder()
+
+  from_initiator -> resp.ping
+  resp.pong -> to_initiator
+}
+
+// ============================================================================
+// MAIN FEDERATED REACTOR
+// ============================================================================
+
+federated reactor {
+  // Initiator federate
+  @interface_tcp(name="initiator_if", address="192.168.1.100")
+  @platform_zephyr
+  initiator = new InitiatorFederate()
+
+  // Responder federate
+  @interface_tcp(name="responder_if", address="192.168.1.101")
+  @platform_zephyr
+  responder = new ResponderFederate()
+
+  // Initiator to Responder - Ping messages
+  @link(left="initiator_if", right="responder_if", server_side="left", server_port=9000)
+  @maxwait(50 msec)
+  initiator.to_responder -> responder.from_initiator after 20 msec
+
+  // Responder to Initiator - Pong messages
+  @link(left="responder_if", right="initiator_if", server_side="right", server_port=9001)
+  @maxwait(50 msec)
+  responder.to_initiator -> initiator.from_responder after 20 msec
+}

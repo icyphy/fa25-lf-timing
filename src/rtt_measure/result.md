@@ -1,0 +1,1 @@
+13-14 ms RTT, considering 1 ms network RTT latency -> 6-7 ms of LF overhead
