@@ -41,6 +41,76 @@
  *    Worker1 → Host (Router) → Worker2
  *    Worker2 → Host (Router) → Worker1
  *    Worker1 & Worker2 → Host (Reducer)
+ *
+ * Logic Flow Sequence:
+ * ====================
+ *
+ * PATTERN 1: SINGLE_NODE
+ * ----------------------
+ * 1. Client generates job with SINGLE_NODE pattern and random target worker
+ * 2. Scheduler routes job to target worker (either Worker1 or Worker2)
+ * 3. Router forwards task from scheduler to worker's stage1_task input
+ * 4. Worker processes task in stage1_task reaction:
+ *    - Performs computation (simulated with sleep)
+ *    - Outputs result directly to stage2_result (skips stage1 output)
+ * 5. Router forwards stage2 result to reducer
+ * 6. Reducer logs completion with processing time
+ *
+ * PATTERN 2: SEQUENTIAL
+ * ---------------------
+ * 1. Client generates job with SEQUENTIAL pattern and random first worker
+ * 2. Scheduler routes job to first worker in sequence
+ * 3. Router forwards task to first worker's stage1_task input
+ * 4. First worker processes in stage1_task reaction:
+ *    - Performs stage1 computation
+ *    - Outputs result to stage1_result (not stage2_result)
+ * 5. Router receives stage1_result and forwards it as peer_stage1_result to second worker
+ * 6. Second worker processes in peer_stage1_result reaction:
+ *    - Performs stage2 computation
+ *    - Combines stage1 + stage2 processing times
+ *    - Outputs combined result to stage2_result
+ * 7. Router forwards final stage2 result to reducer
+ * 8. Reducer logs completion with total processing time
+ *
+ * PATTERN 3: PARALLEL_CROSS
+ * -------------------------
+ * 1. Client generates job with PARALLEL_CROSS pattern (target_worker set to 0)
+ * 2. Scheduler splits job and sends copies to BOTH workers simultaneously
+ * 3. Router forwards both tasks to worker1.stage1_task and worker2.stage1_task
+ * 4. Both workers process in stage1_task reaction:
+ *    - Each performs independent stage1 computation
+ *    - Both output results to stage1_result
+ *    - Workers increment pending_count (waiting for peer result)
+ * 5. Router receives both stage1 results and cross-routes:
+ *    - Worker1's result → Worker2's peer_stage1_result input
+ *    - Worker2's result → Worker1's peer_stage1_result input
+ * 6. Both workers process peer results in peer_stage1_result reaction:
+ *    - Each performs stage2 computation on peer's result
+ *    - Output to stage2_result with stage2 time only (not combined)
+ *    - Decrement pending_count
+ * 7. Router forwards both stage2 results to reducer
+ * 8. Reducer aggregates both results in same reaction:
+ *    - First result stored in pending array
+ *    - Second result triggers aggregation
+ *    - Takes MAX of both processing times
+ *    - Logs completion with maximum time
+ *
+ * Key Implementation Details:
+ * ---------------------------
+ * - Worker.stage1_task reaction: Determines output port based on pattern
+ *   * SINGLE_NODE → stage2_result (direct to reducer)
+ *   * SEQUENTIAL/PARALLEL_CROSS → stage1_result (to router)
+ *
+ * - Worker.peer_stage1_result reaction: Handles stage2 processing
+ *   * SEQUENTIAL: Adds stage1 + stage2 times
+ *   * PARALLEL_CROSS: Uses stage2 time only (reducer aggregates)
+ *
+ * - Reducer reaction: Handles aggregation logic
+ *   * SINGLE_NODE/SEQUENTIAL: Direct logging
+ *   * PARALLEL_CROSS: Waits for both results, takes max time
+ *
+ * - Router: Pure message forwarding with 6 independent reactions
+ *   * No processing logic, just routing based on port connections
  */
 target uC {
   platform: Zephyr,

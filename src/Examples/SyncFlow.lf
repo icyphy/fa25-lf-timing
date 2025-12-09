@@ -1,24 +1,21 @@
 /**
- * Barrier Synchronization Example - WCET Analysis Demo
- * ----------------------------------------------------
- * Logic follows the diagram with a fan-out, a synchronization wall, and a fan-in.
- *
- * Stage 1: Three branches start together (top, mid, bottom). Bottom feeds a
- *          direct bypass to the sink (the long diagonal arrow in the sketch).
- * Barrier: Sits just before the sink, waiting for the top and mid branches.
- * Sink:    Emits a line only when the merged (barrier) path and the bypass arrived.
+ * Two-Branch Barrier Example - WCET Analysis Demo
+ * ------------------------------------------------
+ * Matches the second sketch: one source fans out to a top chain (two hops) and
+ * a bottom chain (one hop). A barrier at the right synchronizes both before
+ * the sink logs completion.
  *
  * WCET Analysis Features:
- * - Each worker performs computational work with measurable execution time
- * - Timing instrumentation captures actual execution times
- * - Different workload patterns demonstrate best/worst case scenarios
+ * - Chain of workers with cumulative execution time analysis
+ * - Different computational workloads per branch
+ * - Timing measurements for individual workers and total chain execution
+ * - Demonstrates critical path analysis in pipeline systems
  */
 target C {
   timeout: 5 sec
 }
 
 preamble {=
-  #include <stdbool.h>
   #include <time.h>
   #include <math.h>
 
@@ -27,7 +24,7 @@ preamble {=
     int branch;
   } token_t;
 
-  // WCET: Timing measurement utilities
+  // WCET: Timing measurement structure
   typedef struct {
     struct timespec start;
     struct timespec end;
@@ -35,28 +32,24 @@ preamble {=
   } timing_info_t;
 
   enum branch_id {
-    BRANCH_TOP_PRE = 0,
-    BRANCH_MID_PRE = 1,
-    BRANCH_BOTTOM_PRE = 2,
-    BRANCH_TOP_POST = 3,
-    BRANCH_BOTTOM_POST = 4
+    BRANCH_TOP1 = 0,
+    BRANCH_TOP2 = 1,
+    BRANCH_BOTTOM = 2
   };
 
   static const char* branch_name(int branch) {
     switch (branch) {
-      case BRANCH_TOP_PRE: return "top-pre";
-      case BRANCH_MID_PRE: return "mid-pre";
-      case BRANCH_BOTTOM_PRE: return "bottom-bypass";
-      case BRANCH_TOP_POST: return "top-post";
-      case BRANCH_BOTTOM_POST: return "bottom-post";
-      default: return "barrier";
+      case BRANCH_TOP1: return "top-hop-1";
+      case BRANCH_TOP2: return "top-hop-2";
+      case BRANCH_BOTTOM: return "bottom-hop";
+      default: return "unknown";
     }
   }
 
   // WCET: Computational workload functions
-  // These functions represent different computational patterns for timing analysis
+  // These demonstrate different execution patterns for timing analysis
 
-  // WCET Annotation: O(n) - Linear complexity workload
+  // WCET Annotation: O(n) - Linear workload
   static double compute_linear_work(int iterations) {
     double result = 0.0;
     for (int i = 0; i < iterations; i++) {
@@ -65,12 +58,12 @@ preamble {=
     return result;
   }
 
-  // WCET Annotation: O(n^2) - Quadratic complexity workload (worst case)
-  static double compute_quadratic_work(int size) {
+  // WCET Annotation: O(n*log(n)) - More complex workload
+  static double compute_nlogn_work(int size) {
     double result = 0.0;
-    for (int i = 0; i < size; i++) {
-      for (int j = 0; j < size; j++) {
-        result += sin((double)(i * j + 1) / 100.0);
+    for (int i = 1; i <= size; i++) {
+      for (int j = 1; j <= (int)(log2(i) + 1); j++) {
+        result += sin((double)(i * j) / 100.0);
       }
     }
     return result;
@@ -83,143 +76,120 @@ preamble {=
   }
 =}
 
-reactor Worker(branch: int = 0, work: time = 0, workload_size: int = 1000) {
+reactor Worker(branch: int = 0, workload_size: int = 1000) {
   input start: token_t
   output done: token_t
-  logical action finish
-  state pending_round: int = -1
   state timing: timing_info_t  // WCET: Store timing measurements
 
-  reaction(start) -> finish {=
+  reaction(start) -> done {=
     if (start->is_present) {
-      self->pending_round = start->value.round;
+      int current_round = start->value.round;
 
       // WCET: Start timing measurement
       clock_gettime(CLOCK_MONOTONIC, &self->timing.start);
 
+      lf_print("[Worker] %s start (round %d)", branch_name(self->branch), current_round);
+
       // WCET: Perform computational work
-      // Branch-specific workload patterns demonstrate different execution times
+      // Different branches use different workload patterns
       double result = 0.0;
-      if (self->branch == BRANCH_TOP_PRE) {
-        // Top branch: Quadratic workload (worst case scenario)
-        result = compute_quadratic_work(self->workload_size / 100);
-      } else if (self->branch == BRANCH_MID_PRE) {
-        // Mid branch: Linear workload (average case)
-        result = compute_linear_work(self->workload_size);
+      if (self->branch == BRANCH_TOP1 || self->branch == BRANCH_TOP2) {
+        // Top chain: More complex workload (n*log(n))
+        result = compute_nlogn_work(self->workload_size);
       } else {
-        // Bottom branch: Linear workload with fewer iterations (best case)
-        result = compute_linear_work(self->workload_size / 2);
+        // Bottom path: Linear workload
+        result = compute_linear_work(self->workload_size);
       }
 
       // Prevent compiler optimization
       if (result < 0) lf_print("Unexpected result");
 
-      lf_print("[Stage 1] %s started (round %d)", branch_name(self->branch), self->pending_round);
-      lf_schedule(finish, self->work);
-    }
-  =}
-
-  reaction(finish) -> done {=
-    if (self->pending_round >= 0) {
       // WCET: End timing measurement
       clock_gettime(CLOCK_MONOTONIC, &self->timing.end);
       self->timing.execution_time_ns = timespec_diff_ns(&self->timing.start, &self->timing.end);
 
-      token_t t = { self->pending_round, self->branch };
-      lf_print("[Stage 1] %s finished (round %d) [WCET: %lld ms]",
+      token_t t = { current_round, self->branch };
+      lf_print("[Worker] %s done (round %d) [WCET: %lld ms]",
                branch_name(self->branch), t.round, self->timing.execution_time_ns / MSEC(1));
       lf_set(done, t);
-      self->pending_round = -1;
     }
   =}
 }
 
-reactor Fanout(rounds: int = 1, spacing: time = 800 msec) {
-  output to_top: token_t
-  output to_mid: token_t
-  output to_bottom: token_t
+reactor Fanout(rounds: int = 2, spacing: time = 700 msec) {
+  output top: token_t
+  output bottom: token_t
   timer tick(0 msec, spacing)
-  state current_round: int = 0
+  state round: int = 0
 
-  reaction(tick) -> to_top, to_mid, to_bottom {=
-    if (self->current_round >= self->rounds) {
-      return;
-    }
-    token_t base = { self->current_round, 0 };
-    token_t top = base;    top.branch = BRANCH_TOP_PRE;
-    token_t mid = base;    mid.branch = BRANCH_MID_PRE;
-    token_t bottom = base; bottom.branch = BRANCH_BOTTOM_PRE;
-
-    lf_print("\n=== Round %d: fan-out ===", self->current_round);
-    lf_set(to_top, top);
-    lf_set(to_mid, mid);
-    lf_set(to_bottom, bottom);
-    self->current_round++;
+  reaction(tick) -> top, bottom {=
+    if (self->round >= self->rounds) return;
+    token_t t = { self->round, BRANCH_TOP1 };
+    token_t b = { self->round, BRANCH_BOTTOM };
+    lf_print("\n=== Round %d fan-out ===", self->round);
+    lf_set(top, t);
+    lf_set(bottom, b);
+    self->round++;
   =}
 }
 
-reactor Barrier {
-  input[2] in: token_t
+reactor JoinBarrier {
+  input top: token_t
+  input bottom: token_t
   output release: token_t
-  state current_round: int = 0
-  state seen_top: bool = false
-  state seen_mid: bool = false
+  state round: int = 0
+  state have_top: bool = false
+  state have_bottom: bool = false
+  state top_arrival: {= struct timespec =}    // WCET: Track arrival times
+  state bottom_arrival: {= struct timespec =}
 
-  reaction(in) -> release {=
-    for (int i = 0; i < in_width; i++) {
-      if (!in[i]->is_present) continue;
-      token_t t = in[i]->value;
-      if (t.round != self->current_round) {
-        lf_print("[Barrier] Ignoring out-of-round token from %s (round %d, expected %d)",
-                 branch_name(t.branch), t.round, self->current_round);
-        continue;
-      }
-      if (t.branch == BRANCH_TOP_PRE) self->seen_top = true;
-      if (t.branch == BRANCH_MID_PRE) self->seen_mid = true;
+  reaction(top, bottom) -> release {=
+    if (top->is_present && top->value.round == self->round) {
+      self->have_top = true;
+      clock_gettime(CLOCK_MONOTONIC, &self->top_arrival);
+    }
+    if (bottom->is_present && bottom->value.round == self->round) {
+      self->have_bottom = true;
+      clock_gettime(CLOCK_MONOTONIC, &self->bottom_arrival);
     }
 
-    if (self->seen_top && self->seen_mid) {
-      token_t go = { self->current_round, -1 };
-      lf_print("[Barrier] Top and mid arrived for round %d → releasing sink merge", self->current_round);
-      lf_set(release, go);
-      self->current_round++;
-      self->seen_top = self->seen_mid = false;
+    if (self->have_top && self->have_bottom) {
+      // WCET: Calculate which path arrived first (critical path analysis)
+      long skew_ns = timespec_diff_ns(&self->bottom_arrival, &self->top_arrival);
+      const char* critical_path = (skew_ns > 0) ? "top chain" : "bottom path";
+      long abs_skew = (skew_ns > 0) ? skew_ns : -skew_ns;
+
+      token_t t = { self->round, -1 };
+      lf_print("[Barrier] Both branches arrived (round %d) → sink [Critical path: %s, skew: %lld ms]",
+               self->round, critical_path, abs_skew / MSEC(1));
+      lf_set(release, t);
+      self->round++;
+      self->have_top = self->have_bottom = false;
     }
   =}
 }
 
 reactor Sink {
-  input merged: token_t      // From barrier after both post workers
-  input bypass: token_t      // Direct bottom path bypassing barrier
-  state round: int = 0
-  state have_merged: bool = false
-  state have_bypass: bool = false
+  input in: token_t
   state round_start_time: {= struct timespec =}  // WCET: Track end-to-end timing
+  state round_count: int = 0
 
   reaction(startup) {=
     // WCET: Initialize timing for first round
     clock_gettime(CLOCK_MONOTONIC, &self->round_start_time);
   =}
 
-  reaction(merged, bypass) {=
-    if (merged->is_present && merged->value.round == self->round) {
-      self->have_merged = true;
-    }
-    if (bypass->is_present && bypass->value.round == self->round) {
-      self->have_bypass = true;
-    }
-
-    if (self->have_merged && self->have_bypass) {
+  reaction(in) {=
+    if (in->is_present) {
       // WCET: Calculate total round time
       struct timespec round_end;
       clock_gettime(CLOCK_MONOTONIC, &round_end);
       long total_time_ns = timespec_diff_ns(&self->round_start_time, &round_end);
 
-      lf_print("[Sink] ✅ Bypass and merged paths aligned for round %d → final merge [Total WCET: %lld ms]",
-               self->round, total_time_ns / MSEC(1));
-      self->round++;
-      self->have_merged = self->have_bypass = false;
+      lf_print("[Sink] ✅ Round %d synchronized and completed [Total pipeline WCET: %lld ms]",
+               in->value.round, total_time_ns / MSEC(1));
 
+      self->round_count++;
       // Start timing for next round
       clock_gettime(CLOCK_MONOTONIC, &self->round_start_time);
     }
@@ -227,21 +197,21 @@ reactor Sink {
 }
 
 main reactor SyncFlow {
-  fan = new Fanout(rounds=2, spacing=700 msec)
-  // WCET: Different workload sizes demonstrate timing variation
-  top = new Worker(branch=0, work=250 msec, workload_size=1200)       // BRANCH_TOP_PRE (worst case: quadratic)
-  mid = new Worker(branch=1, work=180 msec, workload_size=1000)       // BRANCH_MID_PRE (average case)
-  bottom = new Worker(branch=2, work=90 msec, workload_size=800)      // BRANCH_BOTTOM_PRE (best case)
-  barrier = new Barrier()
+  fan = new Fanout(rounds=2, spacing=800 msec)
+  // WCET: Top chain has higher complexity workload (critical path candidate)
+  top1 = new Worker(branch=0, workload_size=1000)    // BRANCH_TOP1
+  top2 = new Worker(branch=1, workload_size=1200)    // BRANCH_TOP2
+  // WCET: Bottom path has simpler workload (comparison path)
+  bottom = new Worker(branch=2, workload_size=900)   // BRANCH_BOTTOM
+  barrier = new JoinBarrier()
   sink = new Sink()
 
-  fan.to_top -> top.start
-  fan.to_mid -> mid.start
-  fan.to_bottom -> bottom.start
+  fan.top -> top1.start
+  fan.bottom -> bottom.start      // Diagonal path going under the top chain
 
-  bottom.done -> sink.bypass      // Diagonal edge that crosses the sync wall
+  top1.done -> top2.start         // Two-hop chain on top
+  top2.done -> barrier.top
+  bottom.done -> barrier.bottom
 
-  // Barrier is the last hop for the top+mid flow before reaching the sink
-  top.done, mid.done -> barrier.in
-  barrier.release -> sink.merged
+  barrier.release -> sink.in
 }
