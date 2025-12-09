@@ -1,0 +1,5 @@
+digraph "CFG for 'TCP2_tick' function" {
+	label="CFG for 'TCP2_tick' function";
+
+	Node0xaaaaf2876b90 [shape=record,color="#b70d28ff", style=filled, fillcolor="#b70d2870",label="{%0:\l  ret void\l}"];
+}

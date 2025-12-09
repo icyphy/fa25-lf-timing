@@ -1,0 +1,98 @@
+// How to compute WCET if there are parallel paths?
+target C {
+    platform: "FlexPRET",
+}
+
+reactor Clock {
+    output tick:int
+    timer t(500ms, 1s)
+    reaction(t) -> tick {=
+        lf_set_present(tick);
+    =}
+}
+
+reactor Sensor {
+    input tick:int
+    output out1:int
+    output out2:int
+    reaction(tick) -> out1, out2 {=
+        lf_set_present(out1);
+        lf_set_present(out2);
+    =}
+}
+
+reactor Middle(duration:time=100ms) {
+    input in:int
+    output out:int
+    reaction(in) -> out {=
+        lf_sleep(self->duration);
+        lf_set_present(out);
+    =}
+}
+
+reactor Processing {
+    input in1:int
+    input in2:int
+    output out1:int
+    output out2:int
+    m1 = new Middle(duration=100ms)
+    m2 = new Middle(duration=200ms)
+    in1 -> m1.in
+    in2 -> m2.in
+    m1.out -> out1
+    m2.out -> out2
+}
+
+reactor Actuator {
+    input in1:int
+    input in2:int
+    output end_time:instant_t
+     reaction(in1, in2) -> end_time {=
+        instant_t t = lf_time_physical_elapsed();
+        lf_set(end_time, t);
+    =}
+}
+
+reactor Timer_Start {
+    input tick:int
+    output start_time:instant_t
+    reaction(tick) -> start_time {=
+        instant_t t = lf_time_physical_elapsed();
+        lf_set(start_time, t);
+    =}
+}
+
+reactor Time_Elapsed_Calculator {
+    input start_time:instant_t
+    input end_time:instant_t
+    state saved_start_time:instant_t = -1
+    
+    reaction(start_time) {=
+        self->saved_start_time = start_time->value;
+    =}
+    
+    reaction(end_time) {=
+        if (self->saved_start_time >= 0) {
+            instant_t elapsed = end_time->value - self->saved_start_time;
+            lf_print("Time elapsed = %d ns", (int)elapsed);
+        }
+    =}
+}
+
+
+main reactor {
+    clk = new Clock()
+    s = new Sensor()
+    t = new Timer_Start()
+    p = new Processing()
+    a = new Actuator()
+    calc = new Time_Elapsed_Calculator()
+    clk.tick -> s.tick
+    clk.tick -> t.tick
+    s.out1 -> p.in1
+    s.out2 -> p.in2
+    p.out1 -> a.in1
+    p.out2 -> a.in2
+    t.start_time -> calc.start_time
+    a.end_time -> calc.end_time
+}

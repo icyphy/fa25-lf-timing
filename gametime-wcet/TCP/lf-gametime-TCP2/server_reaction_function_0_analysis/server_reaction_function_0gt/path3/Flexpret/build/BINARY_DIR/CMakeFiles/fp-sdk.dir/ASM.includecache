@@ -1,0 +1,28 @@
+#IncludeRegexLine: ^[ 	]*[#%][ 	]*(include|import)[ 	]*[<"]([^">]+)([">])
+
+#IncludeRegexScan: ^.*$
+
+#IncludeRegexComplain: ^$
+
+#IncludeRegexTransform: 
+
+/home/flexpret/sdk/lib/include/flexpret/csrs.h
+
+/home/flexpret/sdk/lib/include/flexpret/internal/hwconfig.h
+
+/home/flexpret/sdk/lib/include/flexpret/internal/swconfig.h
+
+/home/flexpret/sdk/lib/include/flexpret/swconfig.h
+flexpret/internal/swconfig.h
+-
+
+/home/flexpret/sdk/lib/src/ctx_switch.S
+flexpret/csrs.h
+-
+
+/home/flexpret/sdk/lib/src/start.S
+flexpret/internal/hwconfig.h
+-
+flexpret/swconfig.h
+-
+

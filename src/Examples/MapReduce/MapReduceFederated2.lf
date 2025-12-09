@@ -1,0 +1,239 @@
+/**
+ * Non-Federated MapReduce System (Local Simulation)
+ * Simplified version for local testing and WCET analysis.
+ */
+target C {
+  timeout: 30 sec
+}
+
+preamble {=
+  #include <stdlib.h>
+  #include <time.h>
+  #include <string.h>
+  #include <stdbool.h>
+
+  typedef enum {
+    SINGLE_NODE, SEQUENTIAL, PARALLEL_CROSS
+  } processing_pattern_t;
+
+  typedef struct {
+    int job_id;
+    processing_pattern_t pattern;
+    int target_worker;
+    long start_time;
+  } map_task_t;
+
+  typedef struct {
+    int job_id;
+    int worker_id;
+    processing_pattern_t pattern;
+    long processing_time_ms;
+    bool succeeded;
+  } map_result_t;
+
+  static inline int random_range(int min, int max) {
+    return min + (rand() % (max - min + 1));
+  }
+=}
+
+// ============================================================================
+// CLIENT: Job Generator
+// ============================================================================
+
+reactor Client(period: time = 2 sec) {
+  timer t(0, period)
+  output out: map_task_t
+  state job_counter: int = 0
+
+  reaction(startup) {=
+    srand(time(NULL));
+  =}
+
+  reaction(t) -> out {=
+    map_task_t task;
+    task.job_id = self->job_counter++;
+    task.start_time = lf_time_physical() / MSEC(1);
+
+    int pattern_type = rand() % 3;
+    task.pattern = (processing_pattern_t)pattern_type;
+    task.target_worker = (pattern_type == 2) ? 0 : ((rand() % 2) + 1);
+
+    const char* patterns[] = {"SINGLE", "SEQ", "PARALLEL"};
+    lf_print("[Client] Job %d [%s]", task.job_id, patterns[pattern_type]);
+
+    lf_set(out, task);
+  =}
+
+  reaction(shutdown) {=
+    lf_print("[Client] Submitted %d jobs", self->job_counter);
+  =}
+}
+
+// ============================================================================
+// SCHEDULER: Job Router
+// ============================================================================
+
+reactor Scheduler {
+  input in: map_task_t
+  output to_worker1: map_task_t
+  output to_worker2: map_task_t
+  state jobs_scheduled: int = 0
+
+  reaction(in) -> to_worker1, to_worker2 {=
+    map_task_t task = in->value;
+
+    if (task.pattern == SINGLE_NODE) {
+      lf_print("[Sched] J%d -> W%d", task.job_id, task.target_worker);
+      if (task.target_worker == 1) lf_set(to_worker1, task);
+      else lf_set(to_worker2, task);
+    } else if (task.pattern == SEQUENTIAL) {
+      lf_print("[Sched] J%d -> W%d->W%d", task.job_id, task.target_worker,
+               (task.target_worker == 1) ? 2 : 1);
+      if (task.target_worker == 1) lf_set(to_worker1, task);
+      else lf_set(to_worker2, task);
+    } else {  // PARALLEL_CROSS
+      lf_print("[Sched] J%d -> W1+W2", task.job_id);
+      map_task_t task1 = task, task2 = task;
+      task1.target_worker = 1;
+      task2.target_worker = 2;
+      lf_set(to_worker1, task1);
+      lf_set(to_worker2, task2);
+    }
+    self->jobs_scheduled++;
+  =}
+
+  reaction(shutdown) {=
+    lf_print("[Sched] Scheduled %d jobs", self->jobs_scheduled);
+  =}
+}
+
+// ============================================================================
+// REDUCER: Result Aggregator (simplified - no pending queue)
+// ============================================================================
+
+reactor Reducer {
+  input from_worker1: map_result_t
+  input from_worker2: map_result_t
+
+  state jobs_completed: int = 0
+  state total_latency_ms: long = 0
+
+  reaction(from_worker1) {=
+    map_result_t result = from_worker1->value;
+    const char* pat = (result.pattern == SINGLE_NODE) ? "SINGLE" : 
+                      (result.pattern == SEQUENTIAL) ? "SEQ" : "PARALLEL";
+    lf_print("[Reduce] J%d [%s] from W%d: %ld ms", 
+             result.job_id, pat, result.worker_id, result.processing_time_ms);
+    self->jobs_completed++;
+    self->total_latency_ms += result.processing_time_ms;
+  =}
+
+  reaction(from_worker2) {=
+    map_result_t result = from_worker2->value;
+    const char* pat = (result.pattern == SINGLE_NODE) ? "SINGLE" : 
+                      (result.pattern == SEQUENTIAL) ? "SEQ" : "PARALLEL";
+    lf_print("[Reduce] J%d [%s] from W%d: %ld ms", 
+             result.job_id, pat, result.worker_id, result.processing_time_ms);
+    self->jobs_completed++;
+    self->total_latency_ms += result.processing_time_ms;
+  =}
+
+  reaction(shutdown) {=
+    lf_print("[Reduce] Completed %d results", self->jobs_completed);
+    if (self->jobs_completed > 0) {
+      lf_print("[Reduce] Avg: %ld ms", self->total_latency_ms / self->jobs_completed);
+    }
+  =}
+}
+
+// ============================================================================
+// WORKER: Task Processor
+// ============================================================================
+
+reactor Worker(worker_id: int = 1, base_processing_ms: int = 100) {
+  input task_in: map_task_t
+  input peer_result: map_result_t
+  output result_out: map_result_t
+  output to_peer: map_result_t
+
+  state tasks_processed: int = 0
+
+  reaction(task_in) -> result_out, to_peer {=
+    map_task_t task = task_in->value;
+
+    long proc_time_ms = self->base_processing_ms + random_range(-20, 50);
+    if (proc_time_ms < 10) proc_time_ms = 10;
+
+    lf_print("[W%d] Processing J%d", self->worker_id, task.job_id);
+    lf_sleep(MSEC(proc_time_ms));
+
+    map_result_t result;
+    result.job_id = task.job_id;
+    result.worker_id = self->worker_id;
+    result.pattern = task.pattern;
+    result.processing_time_ms = proc_time_ms;
+    result.succeeded = true;
+
+    if (task.pattern == SINGLE_NODE) {
+      // Direct to reducer
+      lf_set(result_out, result);
+      self->tasks_processed++;
+    } else {
+      // SEQUENTIAL or PARALLEL_CROSS: send to peer first
+      lf_set(to_peer, result);
+    }
+  =}
+
+  reaction(peer_result) -> result_out {=
+    map_result_t peer = peer_result->value;
+
+    long proc_time_ms = self->base_processing_ms + random_range(-20, 50);
+    if (proc_time_ms < 10) proc_time_ms = 10;
+
+    lf_print("[W%d] Stage2 J%d", self->worker_id, peer.job_id);
+    lf_sleep(MSEC(proc_time_ms));
+
+    map_result_t result;
+    result.job_id = peer.job_id;
+    result.worker_id = self->worker_id;
+    result.pattern = peer.pattern;
+    // For SEQUENTIAL, add times; for PARALLEL, just use stage2 time
+    result.processing_time_ms = (peer.pattern == SEQUENTIAL) ? 
+                                 peer.processing_time_ms + proc_time_ms : proc_time_ms;
+    result.succeeded = peer.succeeded;
+
+    lf_set(result_out, result);
+    self->tasks_processed++;
+  =}
+
+  reaction(shutdown) {=
+    lf_print("[W%d] Processed %d tasks", self->worker_id, self->tasks_processed);
+  =}
+}
+
+// ============================================================================
+// MAIN REACTOR
+// ============================================================================
+
+main reactor {
+  client = new Client()
+  scheduler = new Scheduler()
+  worker1 = new Worker(worker_id=1)
+  worker2 = new Worker(worker_id=2)
+  reducer = new Reducer()
+
+  // Client -> Scheduler
+  client.out -> scheduler.in
+
+  // Scheduler -> Workers
+  scheduler.to_worker1 -> worker1.task_in after 10 msec
+  scheduler.to_worker2 -> worker2.task_in after 10 msec
+
+  // Worker cross-communication (for SEQUENTIAL and PARALLEL_CROSS)
+  worker1.to_peer -> worker2.peer_result after 20 msec
+  worker2.to_peer -> worker1.peer_result after 20 msec
+
+  // Workers -> Reducer
+  worker1.result_out -> reducer.from_worker1 after 10 msec
+  worker2.result_out -> reducer.from_worker2 after 10 msec
+}

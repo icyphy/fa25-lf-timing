@@ -74,10 +74,6 @@ preamble {=
     char log[128];
   } map_result_t;
 
-  static inline long current_time_ms() {
-    return lf_time_physical() / MSEC(1);
-  }
-
   static inline int random_range(int min, int max) {
     return min + (rand() % (max - min + 1));
   }
@@ -100,7 +96,7 @@ reactor Client(min_interval: time = 2 sec, max_interval: time = 3 sec) {
   reaction(submit_job) -> out, submit_job {=
     map_task_t task;
     task.job_id = self->job_counter++;
-    task.start_time = current_time_ms();
+    task.start_time = lf_time_physical() / MSEC(1);
 
     int pattern_type = rand() % 3;
     task.pattern = (processing_pattern_t)pattern_type;
@@ -108,7 +104,9 @@ reactor Client(min_interval: time = 2 sec, max_interval: time = 3 sec) {
 
     const char* patterns[] = {"SINGLE", "SEQ", "PARALLEL"};
     snprintf(task.log, sizeof(task.log), "Job %d [%s]", task.job_id, patterns[pattern_type]);
-    lf_print("[Client] %s", task.log);
+    lf_print("(%lld, %d) [Client] %s, physical time %lld",
+        lf_time_logical_elapsed() / MSEC(1), lf_tag().microstep, task.log,
+        lf_time_physical_elapsed() / MSEC(1));
 
     lf_set(out, task);
     interval_t next = random_range(self->min_interval / MSEC(1), self->max_interval / MSEC(1)) * MSEC(1);
@@ -116,7 +114,8 @@ reactor Client(min_interval: time = 2 sec, max_interval: time = 3 sec) {
   =}
 
   reaction(shutdown) {=
-    lf_print("[Client] Submitted %d jobs", self->job_counter);
+    lf_print("(%lld, %d) [Client] Submitted %d jobs",
+        lf_time_logical_elapsed() / MSEC(1), lf_tag().microstep, self->job_counter);
   =}
 }
 
@@ -131,20 +130,23 @@ reactor Scheduler {
   state jobs_scheduled: int = 0
 
   reaction(in) -> to_worker1, to_worker2 {=
-    if (!in->is_present) return;
+    if (!lf_is_present(in)) return;
     map_task_t task = in->value;
 
     if (task.pattern == SINGLE_NODE) {
-      lf_print("[Sched] J%d → W%d", task.job_id, task.target_worker);
+      lf_print("(%lld, %d) [Sched] J%d → W%d",
+          lf_time_logical_elapsed() / MSEC(1), lf_tag().microstep, task.job_id, task.target_worker);
       if (task.target_worker == 1) lf_set(to_worker1, task);
       else lf_set(to_worker2, task);
     } else if (task.pattern == SEQUENTIAL) {
-      lf_print("[Sched] J%d → W%d→W%d", task.job_id, task.target_worker,
+      lf_print("(%lld, %d) [Sched] J%d → W%d→W%d",
+          lf_time_logical_elapsed() / MSEC(1), lf_tag().microstep, task.job_id, task.target_worker,
                (task.target_worker == 1) ? 2 : 1);
       if (task.target_worker == 1) lf_set(to_worker1, task);
       else lf_set(to_worker2, task);
     } else {  // PARALLEL_CROSS
-      lf_print("[Sched] J%d → W1+W2", task.job_id);
+      lf_print("(%lld, %d) [Sched] J%d → W1+W2",
+          lf_time_logical_elapsed() / MSEC(1), lf_tag().microstep, task.job_id);
       map_task_t task1 = task, task2 = task;
       task1.target_worker = 1;
       task2.target_worker = 2;
@@ -155,7 +157,8 @@ reactor Scheduler {
   =}
 
   reaction(shutdown) {=
-    lf_print("[Sched] Scheduled %d jobs", self->jobs_scheduled);
+    lf_print("(%lld, %d) [Sched] Scheduled %d jobs",
+        lf_time_logical_elapsed() / MSEC(1), lf_tag().microstep, self->jobs_scheduled);
   =}
 }
 
@@ -170,6 +173,8 @@ reactor Reducer {
   state jobs_completed: int = 0
   state jobs_failed: int = 0
   state total_latency_ms: long = 0
+  state min_latency_ms: long = 2147483647
+  state max_latency_ms: long = 0
   state pending_job_ids: int[50]
   state pending_results: map_result_t[50]
   state pending_count: int = 0
@@ -177,12 +182,12 @@ reactor Reducer {
   reaction(from_worker1, from_worker2) {=
     map_result_t* results[2] = {NULL, NULL};
 
-    if (from_worker1->is_present) {
+    if (lf_is_present(from_worker1)) {
       static map_result_t r1;
       r1 = from_worker1->value;
       results[0] = &r1;
     }
-    if (from_worker2->is_present) {
+    if (lf_is_present(from_worker2)) {
       static map_result_t r2;
       r2 = from_worker2->value;
       results[1] = &r2;
@@ -211,11 +216,15 @@ reactor Reducer {
                           first.processing_time_ms : result.processing_time_ms;
 
           if (first.succeeded && result.succeeded) {
-            lf_print("[Reduce] J%d OK: %ld ms", result.job_id, max_time);
+            lf_print("(%lld, %d) [Reduce] J%d OK: %ld ms",
+                lf_time_logical_elapsed() / MSEC(1), lf_tag().microstep, result.job_id, max_time);
             self->jobs_completed++;
             self->total_latency_ms += max_time;
+            if (max_time < self->min_latency_ms) self->min_latency_ms = max_time;
+            if (max_time > self->max_latency_ms) self->max_latency_ms = max_time;
           } else {
-            lf_print("[Reduce] J%d FAIL", result.job_id);
+            lf_print("(%lld, %d) [Reduce] J%d FAIL",
+                lf_time_logical_elapsed() / MSEC(1), lf_tag().microstep, result.job_id);
             self->jobs_failed++;
           }
 
@@ -228,11 +237,15 @@ reactor Reducer {
       } else {
         const char* pat = (result.pattern == SINGLE_NODE) ? "SINGLE" : "SEQ";
         if (result.succeeded) {
-          lf_print("[Reduce] J%d [%s] OK: %ld ms", result.job_id, pat, result.processing_time_ms);
+          lf_print("(%lld, %d) [Reduce] J%d [%s] OK: %ld ms",
+              lf_time_logical_elapsed() / MSEC(1), lf_tag().microstep, result.job_id, pat, result.processing_time_ms);
           self->jobs_completed++;
           self->total_latency_ms += result.processing_time_ms;
+          if (result.processing_time_ms < self->min_latency_ms) self->min_latency_ms = result.processing_time_ms;
+          if (result.processing_time_ms > self->max_latency_ms) self->max_latency_ms = result.processing_time_ms;
         } else {
-          lf_print("[Reduce] J%d [%s] FAIL", result.job_id, pat);
+          lf_print("(%lld, %d) [Reduce] J%d [%s] FAIL",
+              lf_time_logical_elapsed() / MSEC(1), lf_tag().microstep, result.job_id, pat);
           self->jobs_failed++;
         }
       }
@@ -240,9 +253,12 @@ reactor Reducer {
   =}
 
   reaction(shutdown) {=
-    lf_print("[Reduce] Complete:%d Fail:%d", self->jobs_completed, self->jobs_failed);
+    lf_print("(%lld, %d) [Reduce] Complete:%d Fail:%d",
+        lf_time_logical_elapsed() / MSEC(1), lf_tag().microstep, self->jobs_completed, self->jobs_failed);
     if (self->jobs_completed > 0) {
-      lf_print("[Reduce] Avg:%ld ms", self->total_latency_ms / self->jobs_completed);
+      lf_print("(%lld, %d) [Reduce] Avg:%ld ms, Best:%ld ms, Worst:%ld ms",
+          lf_time_logical_elapsed() / MSEC(1), lf_tag().microstep,
+          self->total_latency_ms / self->jobs_completed, self->min_latency_ms, self->max_latency_ms);
     }
   =}
 }
@@ -275,49 +291,50 @@ reactor RouterNode {
   state messages_routed: int = 0
 
   reaction(from_master_w1) -> to_worker1_task {=
-    if (from_master_w1->is_present) {
+    if (lf_is_present(from_master_w1)) {
       lf_set(to_worker1_task, from_master_w1->value);
       self->messages_routed++;
     }
   =}
 
   reaction(from_master_w2) -> to_worker2_task {=
-    if (from_master_w2->is_present) {
+    if (lf_is_present(from_master_w2)) {
       lf_set(to_worker2_task, from_master_w2->value);
       self->messages_routed++;
     }
   =}
 
   reaction(from_worker1_stage1) -> to_worker2_peer {=
-    if (from_worker1_stage1->is_present) {
+    if (lf_is_present(from_worker1_stage1)) {
       lf_set(to_worker2_peer, from_worker1_stage1->value);
       self->messages_routed++;
     }
   =}
 
   reaction(from_worker2_stage1) -> to_worker1_peer {=
-    if (from_worker2_stage1->is_present) {
+    if (lf_is_present(from_worker2_stage1)) {
       lf_set(to_worker1_peer, from_worker2_stage1->value);
       self->messages_routed++;
     }
   =}
 
   reaction(from_worker1_stage2) -> to_reducer_w1 {=
-    if (from_worker1_stage2->is_present) {
+    if (lf_is_present(from_worker1_stage2)) {
       lf_set(to_reducer_w1, from_worker1_stage2->value);
       self->messages_routed++;
     }
   =}
 
   reaction(from_worker2_stage2) -> to_reducer_w2 {=
-    if (from_worker2_stage2->is_present) {
+    if (lf_is_present(from_worker2_stage2)) {
       lf_set(to_reducer_w2, from_worker2_stage2->value);
       self->messages_routed++;
     }
   =}
 
   reaction(shutdown) {=
-    lf_print("[Router] Routed %d messages", self->messages_routed);
+    lf_print("(%lld, %d) [Router] Routed %d messages",
+        lf_time_logical_elapsed() / MSEC(1), lf_tag().microstep, self->messages_routed);
   =}
 }
 
@@ -335,13 +352,15 @@ reactor Worker(worker_id: int = 1, base_processing_ms: int = 100) {
   state pending_count: int = 0
 
   reaction(stage1_task) -> stage1_result, stage2_result {=
-    if (!stage1_task->is_present) return;
+    if (!lf_is_present(stage1_task)) return;
     map_task_t task = stage1_task->value;
 
     long proc_time_ms = self->base_processing_ms + random_range(-20, 50);
     if (proc_time_ms < 10) proc_time_ms = 10;
 
-    lf_print("[W%d] S1 J%d", self->worker_id, task.job_id);
+    lf_print("(%lld, %d) [W%d] S1 J%d, physical time %lld",
+        lf_time_logical_elapsed() / MSEC(1), lf_tag().microstep, self->worker_id, task.job_id,
+        lf_time_physical_elapsed() / MSEC(1));
     lf_sleep(proc_time_ms * MSEC(1));
 
     map_result_t result;
@@ -364,13 +383,15 @@ reactor Worker(worker_id: int = 1, base_processing_ms: int = 100) {
   =}
 
   reaction(peer_stage1_result) -> stage2_result {=
-    if (!peer_stage1_result->is_present) return;
+    if (!lf_is_present(peer_stage1_result)) return;
     map_result_t peer = peer_stage1_result->value;
 
     long proc_time_ms = self->base_processing_ms + random_range(-20, 50);
     if (proc_time_ms < 10) proc_time_ms = 10;
 
-    lf_print("[W%d] S2 J%d", self->worker_id, peer.job_id);
+    lf_print("(%lld, %d) [W%d] S2 J%d, physical time %lld",
+        lf_time_logical_elapsed() / MSEC(1), lf_tag().microstep, self->worker_id, peer.job_id,
+        lf_time_physical_elapsed() / MSEC(1));
     lf_sleep(proc_time_ms * MSEC(1));
 
     // For SEQUENTIAL: combine stage1 + stage2 processing time
@@ -397,7 +418,8 @@ reactor Worker(worker_id: int = 1, base_processing_ms: int = 100) {
   =}
 
   reaction(shutdown) {=
-    lf_print("[W%d] Processed %d tasks", self->worker_id, self->tasks_processed);
+    lf_print("(%lld, %d) [W%d] Processed %d tasks",
+        lf_time_logical_elapsed() / MSEC(1), lf_tag().microstep, self->worker_id, self->tasks_processed);
   =}
 }
 
@@ -483,7 +505,7 @@ reactor Worker2Federate {
 federated reactor {
   // Host federate (PC/Linux - uses C target via platform annotation)
   @interface_tcp(name="host_if", address="192.168.1.100")
-  @platform_linux
+  @platform_zephyr
   host = new HostFederate()
 
   // Worker1 federate (Microcontroller - uses uC/Zephyr)
@@ -498,41 +520,41 @@ federated reactor {
 
   // Host to Worker1 - Tasks
   @link(left="host_if", right="worker1_if", server_side="left", server_port=8001)
-  @maxwait(1000 msec)
+  @maxwait(100 msec)
   host.to_worker1_task -> worker1.stage1_task after 5 msec
 
   // Host to Worker1 - Peer results
   @link(left="host_if", right="worker1_if", server_side="left", server_port=8002)
-  @maxwait(1000 msec)
+  @maxwait(100 msec)
   host.to_worker1_peer -> worker1.peer_stage1_result
 
   // Worker1 to Host - Stage1 results
   @link(left="worker1_if", right="host_if", server_side="right", server_port=8003)
-  @maxwait(1000 msec)
+  @maxwait(100 msec)
   worker1.stage1_result -> host.from_worker1_stage1
 
   // Worker1 to Host - Stage2 results
   @link(left="worker1_if", right="host_if", server_side="right", server_port=8004)
-  @maxwait(1000 msec)
+  @maxwait(100 msec)
   worker1.stage2_result -> host.from_worker1_stage2 after 8 msec
 
   // Host to Worker2 - Tasks
   @link(left="host_if", right="worker2_if", server_side="left", server_port=8011)
-  @maxwait(1000 msec)
+  @maxwait(100 msec)
   host.to_worker2_task -> worker2.stage1_task after 5 msec
 
   // Host to Worker2 - Peer results
   @link(left="host_if", right="worker2_if", server_side="left", server_port=8012)
-  @maxwait(1000 msec)
+  @maxwait(100 msec)
   host.to_worker2_peer -> worker2.peer_stage1_result
 
   // Worker2 to Host - Stage1 results
   @link(left="worker2_if", right="host_if", server_side="right", server_port=8013)
-  @maxwait(1000 msec)
+  @maxwait(100 msec)
   worker2.stage1_result -> host.from_worker2_stage1
 
   // Worker2 to Host - Stage2 results
   @link(left="worker2_if", right="host_if", server_side="right", server_port=8014)
-  @maxwait(1000 msec)
+  @maxwait(100 msec)
   worker2.stage2_result -> host.from_worker2_stage2 after 8 msec
 }

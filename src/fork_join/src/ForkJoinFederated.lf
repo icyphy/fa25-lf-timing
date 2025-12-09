@@ -1,0 +1,321 @@
+/**
+ * Federated Fork-Join System for Microcontrollers
+ *
+ * This federated version demonstrates parallel processing with fork-join pattern
+ * where work is distributed to multiple workers and results are synchronized.
+ *
+ * Architecture:
+ * =============
+ * Federate 0 (Host): Clock, Sensor, Timer_Start, Actuator, Calculator (Zephyr platform)
+ * Federate 1 (Worker1): Middle processor with 100ms duration (Zephyr platform)
+ * Federate 2 (Worker2): Middle processor with 200ms duration (Zephyr platform)
+ *
+ * Network Configuration:
+ * ======================
+ * Host: 192.168.1.100 (Microcontroller with Zephyr)
+ * Worker1: 192.168.1.101 (Microcontroller with Zephyr)
+ * Worker2: 192.168.1.102 (Microcontroller with Zephyr)
+ *
+ * TCP Ports:
+ * - Host → Worker1: 9001
+ * - Worker1 → Host: 9002
+ * - Host → Worker2: 9011
+ * - Worker2 → Host: 9012
+ *
+ * Data Flow:
+ * ==========
+ * 1. Clock ticks trigger Sensor and Timer_Start
+ * 2. Sensor forks data to both Worker1 and Worker2
+ * 3. Workers process in parallel (100ms and 200ms respectively)
+ * 4. Actuator joins results from both workers
+ * 5. Calculator measures elapsed time
+ */
+target uC {
+  platform: Zephyr,
+  timeout: 30 sec
+}
+
+preamble {=
+  #include <stdlib.h>
+  #include <time.h>
+=}
+
+// ============================================================================
+// CLOCK: Periodic Timer
+// ============================================================================
+
+reactor Clock(period: time = 1 sec) {
+  output tick: int
+  timer t(500 msec, period)
+
+  reaction(t) -> tick {=
+    lf_print("(%lld, %d) [Clock] Tick, physical time %lld",
+        lf_time_logical_elapsed() / MSEC(1), lf_tag().microstep,
+        lf_time_physical_elapsed() / MSEC(1));
+    lf_set(tick, 1);
+  =}
+}
+
+// ============================================================================
+// SENSOR: Fork Point - Distributes Work
+// ============================================================================
+
+reactor Sensor {
+  input tick: int
+  output out1: int
+  output out2: int
+  state tick_count: int = 0
+
+  reaction(tick) -> out1, out2 {=
+    self->tick_count++;
+    lf_print("(%lld, %d) [Sensor] Fork tick #%d, physical time %lld",
+        lf_time_logical_elapsed() / MSEC(1), lf_tag().microstep, self->tick_count,
+        lf_time_physical_elapsed() / MSEC(1));
+    lf_set(out1, 1);
+    lf_set(out2, 1);
+  =}
+
+  reaction(shutdown) {=
+    lf_print("(%lld, %d) [Sensor] Processed %d ticks",
+        lf_time_logical_elapsed() / MSEC(1), lf_tag().microstep, self->tick_count);
+  =}
+}
+
+// ============================================================================
+// MIDDLE: Worker Processing Node
+// ============================================================================
+
+reactor Middle(worker_id: int = 1, duration: time = 100 msec) {
+  input in: int
+  output out: int
+  state processed: int = 0
+
+  reaction(in) -> out {=
+    lf_print("(%lld, %d) [Worker%d] Start processing, physical time %lld",
+        lf_time_logical_elapsed() / MSEC(1), lf_tag().microstep, self->worker_id,
+        lf_time_physical_elapsed() / MSEC(1));
+    lf_sleep(self->duration);
+    lf_print("(%lld, %d) [Worker%d] Done processing (%lld ms), physical time %lld",
+        lf_time_logical_elapsed() / MSEC(1), lf_tag().microstep, self->worker_id,
+        self->duration / MSEC(1), lf_time_physical_elapsed() / MSEC(1));
+    lf_set(out, 1);
+    self->processed++;
+  =}
+
+  reaction(shutdown) {=
+    lf_print("(%lld, %d) [Worker%d] Processed %d tasks",
+        lf_time_logical_elapsed() / MSEC(1), lf_tag().microstep,
+        self->worker_id, self->processed);
+  =}
+}
+
+// ============================================================================
+// ACTUATOR: Join Point - Synchronizes Results
+// ============================================================================
+
+reactor Actuator {
+  input in1: int
+  input in2: int
+  output end_time: instant_t
+  state joins: int = 0
+  state pending_w1: bool = false
+  state pending_w2: bool = false
+  state pending_logical_time: instant_t = 0
+
+  reaction(in1, in2) -> end_time {=
+    instant_t t = lf_time_physical_elapsed();
+    bool received1 = lf_is_present(in1);
+    bool received2 = lf_is_present(in2);
+
+    lf_print("(%lld, %d) [Actuator] Join: W1=%s W2=%s, physical time %lld",
+        lf_time_logical_elapsed() / MSEC(1), lf_tag().microstep,
+        received1 ? "ready" : "wait", received2 ? "ready" : "wait",
+        lf_time_physical_elapsed() / MSEC(1));
+
+    // Check if this is a new logical time (new fork-join cycle)
+    instant_t current_logical_time = lf_time_logical();
+    if (current_logical_time != self->pending_logical_time) {
+      // New cycle - reset pending flags
+      self->pending_w1 = false;
+      self->pending_w2 = false;
+      self->pending_logical_time = current_logical_time;
+    }
+
+    // Update pending flags
+    if (received1) self->pending_w1 = true;
+    if (received2) self->pending_w2 = true;
+
+    // Check if both workers have responded (possibly at different microsteps)
+    if (self->pending_w1 && self->pending_w2) {
+      lf_print("(%lld, %d) [Actuator] Both workers complete!",
+          lf_time_logical_elapsed() / MSEC(1), lf_tag().microstep);
+      lf_set(end_time, t);
+      self->joins++;
+      // Reset for next cycle
+      self->pending_w1 = false;
+      self->pending_w2 = false;
+    }
+  =}
+
+  reaction(shutdown) {=
+    lf_print("(%lld, %d) [Actuator] Completed %d joins",
+        lf_time_logical_elapsed() / MSEC(1), lf_tag().microstep, self->joins);
+  =}
+}
+
+// ============================================================================
+// TIMER START: Marks Beginning of Fork-Join Cycle
+// ============================================================================
+
+reactor Timer_Start {
+  input tick: int
+  output start_time: instant_t
+
+  reaction(tick) -> start_time {=
+    instant_t t = lf_time_physical_elapsed();
+    lf_print("(%lld, %d) [Timer] Start mark, physical time %lld",
+        lf_time_logical_elapsed() / MSEC(1), lf_tag().microstep,
+        lf_time_physical_elapsed() / MSEC(1));
+    lf_set(start_time, t);
+  =}
+}
+
+// ============================================================================
+// TIME CALCULATOR: Measures Fork-Join Latency
+// ============================================================================
+
+reactor Time_Elapsed_Calculator {
+  input start_time: instant_t
+  input end_time: instant_t
+  state saved_start_time: instant_t = -1
+  state measurements: int = 0
+  state total_elapsed_ms: long = 0
+  state min_elapsed_ms: long = 999999
+  state max_elapsed_ms: long = 0
+
+  reaction(start_time) {=
+    self->saved_start_time = start_time->value;
+  =}
+
+  reaction(end_time) {=
+    if (self->saved_start_time >= 0) {
+      instant_t elapsed = end_time->value - self->saved_start_time;
+      long elapsed_ms = elapsed / MSEC(1);
+
+      lf_print("(%lld, %d) [Calc] Fork-join elapsed: %ld ms",
+          lf_time_logical_elapsed() / MSEC(1), lf_tag().microstep, elapsed_ms);
+
+      self->measurements++;
+      self->total_elapsed_ms += elapsed_ms;
+      if (elapsed_ms < self->min_elapsed_ms) self->min_elapsed_ms = elapsed_ms;
+      if (elapsed_ms > self->max_elapsed_ms) self->max_elapsed_ms = elapsed_ms;
+
+      self->saved_start_time = -1;
+    }
+  =}
+
+  reaction(shutdown) {=
+    lf_print("(%lld, %d) [Calc] Measurements: %d",
+        lf_time_logical_elapsed() / MSEC(1), lf_tag().microstep, self->measurements);
+    if (self->measurements > 0) {
+      lf_print("(%lld, %d) [Calc] Avg:%ld ms, Best:%ld ms, Worst:%ld ms",
+          lf_time_logical_elapsed() / MSEC(1), lf_tag().microstep,
+          self->total_elapsed_ms / self->measurements, self->min_elapsed_ms, self->max_elapsed_ms);
+    }
+  =}
+}
+
+// ============================================================================
+// FEDERATE REACTORS
+// ============================================================================
+
+// Host Federate: Contains coordination logic
+reactor HostFederate {
+  output to_worker1: int
+  output to_worker2: int
+  input from_worker1: int
+  input from_worker2: int
+
+  clk = new Clock()
+  sensor = new Sensor()
+  timer_start = new Timer_Start()
+  actuator = new Actuator()
+  calc = new Time_Elapsed_Calculator()
+
+  // Internal connections
+  clk.tick -> sensor.tick
+  clk.tick -> timer_start.tick
+  actuator.end_time -> calc.end_time
+  timer_start.start_time -> calc.start_time
+
+  // Federate boundary outputs
+  sensor.out1 -> to_worker1
+  sensor.out2 -> to_worker2
+
+  // Federate boundary inputs
+  from_worker1 -> actuator.in1
+  from_worker2 -> actuator.in2
+}
+
+// Worker1 Federate
+reactor Worker1Federate {
+  input task: int
+  output result: int
+
+  worker = new Middle(worker_id=1, duration=100 msec)
+
+  task -> worker.in
+  worker.out -> result
+}
+
+// Worker2 Federate
+reactor Worker2Federate {
+  input task: int
+  output result: int
+
+  worker = new Middle(worker_id=2, duration=200 msec)
+
+  task -> worker.in
+  worker.out -> result
+}
+
+// ============================================================================
+// MAIN FEDERATED REACTOR
+// ============================================================================
+
+federated reactor {
+  // Host federate (Microcontroller with Zephyr)
+  @interface_tcp(name="host_if", address="192.168.1.100")
+  @platform_zephyr
+  host = new HostFederate()
+
+  // Worker1 federate (Microcontroller with Zephyr)
+  @interface_tcp(name="worker1_if", address="192.168.1.101")
+  @platform_zephyr
+  worker1 = new Worker1Federate()
+
+  // Worker2 federate (Microcontroller with Zephyr)
+  @interface_tcp(name="worker2_if", address="192.168.1.102")
+  @platform_zephyr
+  worker2 = new Worker2Federate()
+
+  // Host to Worker1 - Task distribution
+  @link(left="host_if", right="worker1_if", server_side="left", server_port=9001)
+  @maxwait(100 msec)
+  host.to_worker1 -> worker1.task after 20 msec
+
+  // Worker1 to Host - Result collection
+  @link(left="worker1_if", right="host_if", server_side="right", server_port=9002)
+  @maxwait(250 msec)
+  worker1.result -> host.from_worker1 after 250 msec
+
+  // Host to Worker2 - Task distribution
+  @link(left="host_if", right="worker2_if", server_side="left", server_port=9011)
+  @maxwait(100 msec)
+  host.to_worker2 -> worker2.task after 20 msec
+
+  // Worker2 to Host - Result collection
+  @link(left="worker2_if", right="host_if", server_side="right", server_port=9012)
+  @maxwait(250 msec)
+  worker2.result -> host.from_worker2 after 250 msec
+}

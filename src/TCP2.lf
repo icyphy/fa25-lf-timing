@@ -1,0 +1,110 @@
+target C {
+    timeout: 5 sec
+}
+
+preamble {=
+    #include <stdlib.h>
+    #include <time.h>
+
+    typedef struct {
+        int id;
+        int seq;
+        int flags;
+        /*
+        0 = SYN
+        1 = ACK
+        2 = FIN
+        */
+    } packet;
+
+    static inline int randint(int a, int b) {
+        return (rand() % (b - a + 1)) + a;
+    }
+=}
+
+reactor Client(period: time = 1 sec) {
+    timer t(0, period)
+    state id: int = 0
+
+    input inp: packet
+    output outp: packet
+    
+    reaction(startup) {=
+        srand(time(NULL));
+    =}
+
+    reaction(t) -> outp {=
+        packet *p = malloc(sizeof(packet));
+        p->id = self->id++;
+        p->seq = 0;
+        p->flags = 1; // SYN
+        lf_set(outp, *p);
+    =}
+
+    reaction(inp) -> outp {=
+        packet *in = &inp->value;
+        packet *out = malloc(sizeof(packet));
+        out->id = in->id;
+        out->seq = in->seq + 1;
+
+        bool send = true;
+        lf_print("(%lld, %d) [CLIENT] Received packet id=%d seq=%d",
+            lf_time_logical_elapsed(), lf_tag().microstep, in->id, in->seq);
+        switch (in->flags) {
+            case 3: // SYN-ACK
+                lf_print("[CLIENT] Received SYN-ACK", lf_time_logical_elapsed(), lf_tag().microstep);
+                out->flags = 2; // ACK
+                break;
+        }
+
+        lf_sleep(MSEC(randint(40, 60))); // simulate processing + connection delay
+        if (send)
+            lf_set(outp, *out);
+    =}
+}
+
+reactor Server(refresh: time = 20 msec) {
+    input inp: packet
+    output outp: packet
+
+    timer t(0, refresh)
+
+    reaction(inp) -> outp {=
+        packet *in = &inp->value;
+        packet *out = malloc(sizeof(packet));
+        out->id = in->id;
+        out->seq = in->seq + 1;
+
+        bool send = true;
+        lf_print("(%lld, %d) [SERVER] Received packet id=%d seq=%d",
+            lf_time_logical_elapsed(), lf_tag().microstep, in->id, in->seq);
+        switch (in->flags) {
+            case 1: // SYN
+                lf_print("[SERVER] Received SYN", lf_time_logical_elapsed(), lf_tag().microstep);
+                out->flags = 3; // SYN-ACK
+                break;    
+            case 2: // ACK
+                lf_print("[SERVER] Received ACK", lf_time_logical_elapsed(), lf_tag().microstep);
+                send = false;
+                break;
+        }
+
+        lf_sleep(MSEC(100));
+        if (send)
+            lf_set(outp, *out);
+    =} deadline(50 msec) {=
+        lf_print("(%lld, %d) [SERVER] Packet queue overloaded...",
+            lf_time_logical_elapsed(), lf_tag().microstep);
+    =}
+
+    reaction(t, inp) {=
+        // refresh --> triggers network bandwidth overload
+    =}
+}
+
+main reactor TCP2 {
+    c = new Client()
+    s = new Server()
+    c.outp -> s.inp after 50 msec
+    s.outp -> c.inp after 50 msec
+}

@@ -1,11 +1,19 @@
 // How to compute WCET if there are parallel paths?
 target C
 
+reactor Clock {
+    output tick:int
+    timer t(500ms, 1s)
+    reaction(t) -> tick {=
+        lf_set_present(tick);
+    =}
+}
+
 reactor Sensor {
+    input tick:int
     output out1:int
     output out2:int
-    timer t(500ms, 1s)
-    reaction(t) -> out1, out2 {=
+    reaction(tick) -> out1, out2 {=
         lf_set_present(out1);
         lf_set_present(out2);
     =}
@@ -36,16 +44,50 @@ reactor Processing {
 reactor Actuator {
     input in1:int
     input in2:int
-    reaction(in1, in2) {==}
+    output end_time:instant_t
+     reaction(in1, in2) -> end_time {=
+        instant_t t = lf_time_physical_elapsed();
+        lf_set(end_time, t);
+    =}
 }
 
+reactor Timer_Start {
+    input tick:int
+    output start_time:instant_t
+    reaction(tick) -> start_time {=
+        instant_t t = lf_time_physical_elapsed();
+        lf_set(start_time, t);
+    =}
+}
+
+reactor Time_Elapsed_Calculator {
+    output time_elapsed:instant_t
+    input start_time:instant_t
+    input end_time:instant_t
+    reaction(start_time, end_time) -> time_elapsed {=
+        instant_t elapsed = end_time-start_time;
+        lf_set(time_elapsed, elapsed);
+    =}
+}
+
+
 main reactor {
+    clk = new Clock()
     s = new Sensor()
+    t = new Timer_Start()
     p = new Processing()
     a = new Actuator()
+    calc = new Time_Elapsed_Calculator()
+    clk.tick -> s.tick
+    clk.tick -> t.tick
     s.out1 -> p.in1
     s.out2 -> p.in2
     p.out1 -> a.in1
     p.out2 -> a.in2
+    t.start_time -> calc.start_time
+    a.end_time -> calc.end_time
+    reaction(calc.time_elapsed) {=
+        lf_print("Time elapsed = %lld", calc.time_elapsed->value);
+    =}
 }
 

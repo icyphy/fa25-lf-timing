@@ -29,9 +29,8 @@ source /home/gametime/.venv/bin/activate && export PYTHONPATH=/home/gametime/src
 docker exec gametime-work bash -c "cd /home/gametime && clang++-16 -shared -fPIC src/custom_passes/custom_inline_pass.cpp -o src/custom_passes/custom_inline_pass.so \$(llvm-config --cxxflags --ldflags --libs) -Wl,-rpath,\$(llvm-config --libdir)"
 ```
 
-8. `cd /home/gametime/test/tacle_test`
  
-9. If you get klee header error, run this in the container:
+8. If you get klee header error, run this in the container:
  ```
     mkdir -p /opt/homebrew/include
     ln -sf /usr/local/include/klee /opt/homebrew/include/klee

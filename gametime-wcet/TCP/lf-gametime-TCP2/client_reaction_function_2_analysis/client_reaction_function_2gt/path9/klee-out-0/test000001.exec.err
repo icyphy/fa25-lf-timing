@@ -1,0 +1,4 @@
+Error: external call with symbolic argument: printf
+Stack: 
+	#000000087 in _clientreaction_function_2(280235922685952, 280225185267712, symbolic, symbolic, symbolic)
+	#100000201 in main()
