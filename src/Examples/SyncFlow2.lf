@@ -1,0 +1,225 @@
+/**
+ * Two-Branch Barrier Example - WCET Analysis Demo
+ * ------------------------------------------------
+ * Matches the second sketch: one source fans out to a top chain (two hops) and
+ * a bottom chain (one hop). A barrier at the right synchronizes both before
+ * the sink logs completion.
+ *
+ * WCET Analysis Features:
+ * - Chain of workers with cumulative execution time analysis
+ * - Different computational workloads per branch
+ * - Timing measurements for individual workers and total chain execution
+ * - Demonstrates critical path analysis in pipeline systems
+ */
+target C {
+  timeout: 5 sec
+}
+
+preamble {=
+  #include <time.h>
+  #include <math.h>
+
+  typedef struct {
+    int round;
+    int branch;
+  } token_t;
+
+  // WCET: Timing measurement structure
+  typedef struct {
+    struct timespec start;
+    struct timespec end;
+    long execution_time_ns;
+  } timing_info_t;
+
+  enum branch_id {
+    BRANCH_TOP1 = 0,
+    BRANCH_TOP2 = 1,
+    BRANCH_BOTTOM = 2
+  };
+
+  static const char* branch_name(int branch) {
+    switch (branch) {
+      case BRANCH_TOP1: return "top-hop-1";
+      case BRANCH_TOP2: return "top-hop-2";
+      case BRANCH_BOTTOM: return "bottom-hop";
+      default: return "unknown";
+    }
+  }
+
+  // WCET: Computational workload functions
+  // These demonstrate different execution patterns for timing analysis
+
+  // WCET Annotation: O(n) - Linear workload
+  static double compute_linear_work(int iterations) {
+    double result = 0.0;
+    for (int i = 0; i < iterations; i++) {
+      result += sqrt((double)(i + 1));
+    }
+    return result;
+  }
+
+  // WCET Annotation: O(n*log(n)) - More complex workload
+  static double compute_nlogn_work(int size) {
+    double result = 0.0;
+    for (int i = 1; i <= size; i++) {
+      for (int j = 1; j <= (int)(log2(i) + 1); j++) {
+        result += sin((double)(i * j) / 100.0);
+      }
+    }
+    return result;
+  }
+
+  // WCET: Timing utilities
+  static long timespec_diff_ns(struct timespec *start, struct timespec *end) {
+    return (end->tv_sec - start->tv_sec) * 1000000000L +
+           (end->tv_nsec - start->tv_nsec);
+  }
+=}
+
+reactor Worker(branch: int = 0, delay: time = 0, workload_size: int = 1000) {
+  input start: token_t
+  output done: token_t
+  logical action finish
+  state current_round: int = -1
+  state timing: timing_info_t  // WCET: Store timing measurements
+
+  reaction(start) -> finish {=
+    if (start->is_present) {
+      self->current_round = start->value.round;
+
+      // WCET: Start timing measurement
+      clock_gettime(CLOCK_MONOTONIC, &self->timing.start);
+
+      // WCET: Perform computational work
+      // Different branches use different workload patterns
+      double result = 0.0;
+      if (self->branch == BRANCH_TOP1 || self->branch == BRANCH_TOP2) {
+        // Top chain: More complex workload (n*log(n))
+        result = compute_nlogn_work(self->workload_size);
+      } else {
+        // Bottom path: Linear workload
+        result = compute_linear_work(self->workload_size);
+      }
+
+      // Prevent compiler optimization
+      if (result < 0) lf_print("Unexpected result");
+
+      lf_print("[Worker] %s start (round %d)", branch_name(self->branch), self->current_round);
+      lf_schedule(finish, self->delay);
+    }
+  =}
+
+  reaction(finish) -> done {=
+    if (self->current_round >= 0) {
+      // WCET: End timing measurement
+      clock_gettime(CLOCK_MONOTONIC, &self->timing.end);
+      self->timing.execution_time_ns = timespec_diff_ns(&self->timing.start, &self->timing.end);
+
+      token_t t = { self->current_round, self->branch };
+      lf_print("[Worker] %s done (round %d) [WCET: %lld ms]",
+               branch_name(self->branch), t.round, self->timing.execution_time_ns / MSEC(1));
+      lf_set(done, t);
+      self->current_round = -1;
+    }
+  =}
+}
+
+reactor Fanout(rounds: int = 2, spacing: time = 700 msec) {
+  output top: token_t
+  output bottom: token_t
+  timer tick(0 msec, spacing)
+  state round: int = 0
+
+  reaction(tick) -> top, bottom {=
+    if (self->round >= self->rounds) return;
+    token_t t = { self->round, BRANCH_TOP1 };
+    token_t b = { self->round, BRANCH_BOTTOM };
+    lf_print("\n=== Round %d fan-out ===", self->round);
+    lf_set(top, t);
+    lf_set(bottom, b);
+    self->round++;
+  =}
+}
+
+reactor JoinBarrier {
+  input top: token_t
+  input bottom: token_t
+  output release: token_t
+  state round: int = 0
+  state have_top: bool = false
+  state have_bottom: bool = false
+  state top_arrival: {= struct timespec =}    // WCET: Track arrival times
+  state bottom_arrival: {= struct timespec =}
+
+  reaction(top, bottom) -> release {=
+    if (top->is_present && top->value.round == self->round) {
+      self->have_top = true;
+      clock_gettime(CLOCK_MONOTONIC, &self->top_arrival);
+    }
+    if (bottom->is_present && bottom->value.round == self->round) {
+      self->have_bottom = true;
+      clock_gettime(CLOCK_MONOTONIC, &self->bottom_arrival);
+    }
+
+    if (self->have_top && self->have_bottom) {
+      // WCET: Calculate which path arrived first (critical path analysis)
+      long skew_ns = timespec_diff_ns(&self->bottom_arrival, &self->top_arrival);
+      const char* critical_path = (skew_ns > 0) ? "top chain" : "bottom path";
+      long abs_skew = (skew_ns > 0) ? skew_ns : -skew_ns;
+
+      token_t t = { self->round, -1 };
+      lf_print("[Barrier] Both branches arrived (round %d) → sink [Critical path: %s, skew: %lld ms]",
+               self->round, critical_path, abs_skew / MSEC(1));
+      lf_set(release, t);
+      self->round++;
+      self->have_top = self->have_bottom = false;
+    }
+  =}
+}
+
+reactor Sink {
+  input in: token_t
+  state round_start_time: {= struct timespec =}  // WCET: Track end-to-end timing
+  state round_count: int = 0
+
+  reaction(startup) {=
+    // WCET: Initialize timing for first round
+    clock_gettime(CLOCK_MONOTONIC, &self->round_start_time);
+  =}
+
+  reaction(in) {=
+    if (in->is_present) {
+      // WCET: Calculate total round time
+      struct timespec round_end;
+      clock_gettime(CLOCK_MONOTONIC, &round_end);
+      long total_time_ns = timespec_diff_ns(&self->round_start_time, &round_end);
+
+      lf_print("[Sink] ✅ Round %d synchronized and completed [Total pipeline WCET: %lld ms]",
+               in->value.round, total_time_ns / MSEC(1));
+
+      self->round_count++;
+      // Start timing for next round
+      clock_gettime(CLOCK_MONOTONIC, &self->round_start_time);
+    }
+  =}
+}
+
+main reactor SyncFlow2 {
+  fan = new Fanout(rounds=2, spacing=800 msec)
+  // WCET: Top chain has higher complexity workload (critical path candidate)
+  top1 = new Worker(branch=0, delay=250 msec, workload_size=1000)    // BRANCH_TOP1
+  top2 = new Worker(branch=1, delay=220 msec, workload_size=1200)    // BRANCH_TOP2
+  // WCET: Bottom path has simpler workload (comparison path)
+  bottom = new Worker(branch=2, delay=180 msec, workload_size=900)   // BRANCH_BOTTOM
+  barrier = new JoinBarrier()
+  sink = new Sink()
+
+  fan.top -> top1.start
+  fan.bottom -> bottom.start      // Diagonal path going under the top chain
+
+  top1.done -> top2.start         // Two-hop chain on top
+  top2.done -> barrier.top
+  bottom.done -> barrier.bottom
+
+  barrier.release -> sink.in
+}
