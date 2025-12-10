@@ -1,0 +1,341 @@
+/**
+ * Barrier Synchronization Example - WCET Analysis Demo
+ * ----------------------------------------------------
+ * Logic follows the diagram with a fan-out, a synchronization wall, and a fan-in.
+ *
+ * Stage 1: Three branches start together (top, mid, bottom). Bottom feeds a
+ *          direct bypass to the sink (the long diagonal arrow in the sketch).
+ * Barrier: Sits just before the sink, waiting for the top and mid branches.
+ * Sink:    Emits a line only when the merged (barrier) path and the bypass arrived.
+ *
+ * WCET Analysis Features:
+ * - Each worker performs computational work with measurable execution time
+ * - Timing instrumentation captures actual execution times
+ * - Different workload patterns demonstrate best/worst case scenarios
+ */
+target uC {
+  platform: Zephyr,
+  timeout: 30 sec
+}
+
+preamble {=
+  #include <stdbool.h>
+
+  typedef struct {
+    int round;
+    int branch;
+  } token_t;
+
+  // WCET: Timing measurement using physical time
+  typedef struct {
+    instant_t start_time;
+    interval_t execution_time;
+  } timing_info_t;
+
+  enum branch_id {
+    BRANCH_TOP_PRE = 0,
+    BRANCH_MID_PRE = 1,
+    BRANCH_BOTTOM_PRE = 2,
+    BRANCH_TOP_POST = 3,
+    BRANCH_BOTTOM_POST = 4
+  };
+
+  static const char* branch_name(int branch) {
+    switch (branch) {
+      case BRANCH_TOP_PRE: return "top-pre";
+      case BRANCH_MID_PRE: return "mid-pre";
+      case BRANCH_BOTTOM_PRE: return "bottom-bypass";
+      case BRANCH_TOP_POST: return "top-post";
+      case BRANCH_BOTTOM_POST: return "bottom-post";
+      default: return "barrier";
+    }
+  }
+
+  // WCET: Computational workload functions
+  // These functions represent different computational patterns for timing analysis
+  // Use volatile to prevent compiler optimization
+
+  // WCET Annotation: O(n) - Linear complexity workload
+  static long compute_linear_work(int iterations) {
+    volatile long result = 0;
+    for (volatile int i = 0; i < iterations; i++) {
+      result += i;
+    }
+    return result;
+  }
+
+  // WCET Annotation: O(n^2) - Quadratic complexity workload (worst case)
+  static long compute_quadratic_work(int size) {
+    volatile long result = 0;
+    for (volatile int i = 0; i < size; i++) {
+      for (volatile int j = 0; j < size; j++) {
+        result += i + j;
+      }
+    }
+    return result;
+  }
+
+=}
+
+reactor Worker(branch: int = 0, workload_size: int = 1000) {
+  input start: token_t
+  output done: token_t
+  state timing: timing_info_t  // WCET: Store timing measurements
+  state round_start_time: instant_t  // Track start of each round
+
+  reaction(start) -> done {=
+    if (lf_is_present(start)) {
+      int current_round = start->value.round;
+
+      // WCET: Capture round start time (before any work)
+      self->round_start_time = lf_time_physical();
+
+      lf_print("(%lld, %d) [Stage 1] %s started (round %d), physical time %lld",
+               lf_time_logical_elapsed() / MSEC(1), lf_tag().microstep,
+               branch_name(self->branch), current_round,
+               lf_time_physical_elapsed() / MSEC(1));
+
+      // WCET: Start timing measurement for computation
+      self->timing.start_time = lf_time_physical();
+
+      // WCET: Perform computational work
+      // Branch-specific workload patterns demonstrate different execution times
+      // volatile variables prevent compiler optimization
+      long result = 0;
+      if (self->branch == BRANCH_TOP_PRE) {
+        // Top branch: Quadratic workload (worst case scenario)
+        result = compute_quadratic_work(self->workload_size);
+      } else if (self->branch == BRANCH_MID_PRE) {
+        // Mid branch: Linear workload (average case)
+        result = compute_linear_work(self->workload_size);
+      } else {
+        // Bottom branch: Linear workload with fewer iterations (best case)
+        result = compute_linear_work(self->workload_size / 2);
+      }
+
+      // WCET: End timing measurement
+      instant_t now = lf_time_physical();
+      self->timing.execution_time = now - self->timing.start_time;
+      interval_t round_elapsed = now - self->round_start_time;
+
+      token_t t = { current_round, self->branch };
+      lf_print("(%lld, %d) [Stage 1] %s finished (round %d) [Comp: %lld ms, Round: %lld ms], physical time %lld",
+               lf_time_logical_elapsed() / MSEC(1), lf_tag().microstep,
+               branch_name(self->branch), t.round,
+               self->timing.execution_time / MSEC(1),
+               round_elapsed / MSEC(1),
+               lf_time_physical_elapsed() / MSEC(1));
+      lf_set(done, t);
+    }
+  =}
+}
+
+reactor Fanout {
+  input trigger: token_t  // Triggered by timer in parent
+  output to_top: token_t
+  output to_mid: token_t
+  output to_bottom: token_t
+
+  reaction(trigger) -> to_top, to_mid, to_bottom {=
+    if (lf_is_present(trigger)) {
+      int round = trigger->value.round;
+      token_t base = { round, 0 };
+      token_t top = base;    top.branch = BRANCH_TOP_PRE;
+      token_t mid = base;    mid.branch = BRANCH_MID_PRE;
+      token_t bottom = base; bottom.branch = BRANCH_BOTTOM_PRE;
+
+      lf_print("\n(%lld, %d) === Round %d: fan-out ===, physical time %lld",
+               lf_time_logical_elapsed() / MSEC(1), lf_tag().microstep,
+               round, lf_time_physical_elapsed() / MSEC(1));
+      lf_set(to_top, top);
+      lf_set(to_mid, mid);
+      lf_set(to_bottom, bottom);
+    }
+  =}
+}
+
+reactor Barrier {
+  input top_in: token_t
+  input mid_in: token_t
+  output release: token_t
+  state current_round: int = 0
+  state seen_top: bool = false
+  state seen_mid: bool = false
+
+  reaction(top_in, mid_in) -> release {=
+    if (lf_is_present(top_in)) {
+      token_t t = top_in->value;
+      if (t.round == self->current_round) {
+        self->seen_top = true;
+      }
+    }
+
+    if (lf_is_present(mid_in)) {
+      token_t t = mid_in->value;
+      if (t.round == self->current_round) {
+        self->seen_mid = true;
+      }
+    }
+
+    if (self->seen_top && self->seen_mid) {
+      token_t go = { self->current_round, -1 };
+      lf_print("(%lld, %d) [Barrier] Top and mid arrived for round %d → releasing sink merge, physical time %lld",
+               lf_time_logical_elapsed() / MSEC(1), lf_tag().microstep,
+               self->current_round, lf_time_physical_elapsed() / MSEC(1));
+      lf_set(release, go);
+      self->current_round++;
+      self->seen_top = self->seen_mid = false;
+    }
+  =}
+}
+
+reactor Sink {
+  input merged: token_t       // From barrier after both post workers
+  input bypass: token_t       // Direct bottom path bypassing barrier
+  output done: token_t        // Signal when round completes
+  state round: int = 0
+  state have_merged: bool = false
+  state have_bypass: bool = false
+
+  reaction(merged, bypass) -> done {=
+    if (lf_is_present(merged) && merged->value.round == self->round) {
+      self->have_merged = true;
+    }
+    if (lf_is_present(bypass) && bypass->value.round == self->round) {
+      self->have_bypass = true;
+    }
+
+    if (self->have_merged && self->have_bypass) {
+      lf_print("(%lld, %d) [Sink] ✅ Bypass and merged paths aligned for round %d → final merge, physical time %lld",
+               lf_time_logical_elapsed() / MSEC(1), lf_tag().microstep,
+               self->round, lf_time_physical_elapsed() / MSEC(1));
+
+      token_t completion = { self->round, -1 };
+      lf_set(done, completion);
+      self->round++;
+      self->have_merged = self->have_bypass = false;
+    }
+  =}
+}
+
+// ============================================================================
+// FEDERATE REACTORS
+// ============================================================================
+
+// Host federate: Contains Fanout, Barrier, Sink, and Bottom Worker
+reactor HostBottomFederate {
+  output to_top: token_t
+  output to_mid: token_t
+  input from_top: token_t
+  input from_mid: token_t
+
+  timer round_timer(0 msec, 700 msec)  // Timer for triggering rounds
+  state current_round: int = 0
+  state round_start_time: instant_t  // WCET: Track round start time
+
+  fan = new Fanout()
+  bottom = new Worker(branch=2, workload_size=5000)  // BRANCH_BOTTOM_PRE (best case: linear)
+  barrier = new Barrier()
+  sink = new Sink()
+
+  // Capture round start time when timer fires and trigger Fanout
+  reaction(round_timer) -> fan.trigger {=
+    if (self->current_round >= 5) {
+      return;
+    }
+
+    // Capture timestamp immediately when timer fires
+    self->round_start_time = lf_time_physical();
+
+    // Trigger the fanout
+    token_t trigger = { self->current_round, 0 };
+    lf_set(fan.trigger, trigger);
+    self->current_round++;
+  =}
+
+  // Calculate and print round WCET when Sink completes
+  reaction(sink.done) {=
+    if (lf_is_present(sink.done)) {
+      instant_t round_end = lf_time_physical();
+      interval_t round_wcet = round_end - self->round_start_time;
+
+      lf_print("(%lld, %d) [Host] Round %d complete [Round WCET: %lld ms], physical time %lld",
+               lf_time_logical_elapsed() / MSEC(1), lf_tag().microstep,
+               sink.done->value.round, round_wcet / MSEC(1),
+               lf_time_physical_elapsed() / MSEC(1));
+    }
+  =}
+
+  fan.to_top -> to_top
+  fan.to_mid -> to_mid
+  fan.to_bottom -> bottom.start
+
+  from_top -> barrier.top_in
+  from_mid -> barrier.mid_in
+  bottom.done -> sink.bypass
+
+  barrier.release -> sink.merged
+}
+
+// Top Worker federate
+reactor TopFederate {
+  input task: token_t
+  output result: token_t
+
+  top = new Worker(branch=0, workload_size=1000)  // BRANCH_TOP_PRE (worst case: quadratic)
+
+  task -> top.start
+  top.done -> result
+}
+
+// Mid Worker federate
+reactor MidFederate {
+  input task: token_t
+  output result: token_t
+
+  mid = new Worker(branch=1, workload_size=50000)  // BRANCH_MID_PRE (average case: linear)
+
+  task -> mid.start
+  mid.done -> result
+}
+
+// ============================================================================
+// MAIN FEDERATED REACTOR
+// ============================================================================
+
+federated reactor SyncFlow2 {
+  // Host federate (192.168.1.100) - contains Fanout, Barrier, Sink, and Bottom worker
+  @interface_tcp(name="host_if", address="192.168.1.100")
+  @platform_zephyr
+  host = new HostBottomFederate()
+
+  // Top worker federate (192.168.1.101)
+  @interface_tcp(name="top_if", address="192.168.1.101")
+  @platform_zephyr
+  top_fed = new TopFederate()
+
+  // Mid worker federate (192.168.1.102)
+  @interface_tcp(name="mid_if", address="192.168.1.102")
+  @platform_zephyr
+  mid_fed = new MidFederate()
+
+  // Host to Top - Task distribution
+  @link(left="host_if", right="top_if", server_side="left", server_port=9001)
+  @maxwait(50 msec)
+  host.to_top -> top_fed.task after 50 msec
+
+  // Top to Host - Result collection
+  @link(left="top_if", right="host_if", server_side="right", server_port=9002)
+  @maxwait(200 msec)
+  top_fed.result -> host.from_top after 200 msec
+
+  // Host to Mid - Task distribution
+  @link(left="host_if", right="mid_if", server_side="left", server_port=9011)
+  @maxwait(50 msec)
+  host.to_mid -> mid_fed.task after 50 msec
+
+  // Mid to Host - Result collection
+  @link(left="mid_if", right="host_if", server_side="right", server_port=9012)
+  @maxwait(200 msec)
+  mid_fed.result -> host.from_mid after 200 msec
+}
