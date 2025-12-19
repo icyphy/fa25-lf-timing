@@ -1,0 +1,23 @@
+---
+gametime-project:
+  file:
+    location: arbitrator_reaction_function_2.c
+    analysis-function: _arbitratorreaction_function_2
+    start-label: null
+    end-label: null
+
+
+  preprocess:
+    include: null
+    merge: null
+    inline: yes
+    unroll-loops: Yes
+
+  analysis:
+    maximum-error-scale-factor: 10
+    determinant-threshold: 0.001
+    max-infeasible-paths: 100
+    ilp-solver: glpk
+    gametime-flexpret-path: ../flexpret/
+    gametime-path: ../../
+    gametime-file-path: ../../../..

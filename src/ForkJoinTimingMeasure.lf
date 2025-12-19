@@ -21,12 +21,23 @@ reactor Sensor {
     =}
 }
 
-reactor Middle(duration:time=100ms) {
+reactor Middle(id:int=0) {
     input in:int
     output out:int
+    state counter:int = 0
+    
     reaction(in) -> out {=
-        lf_sleep(self->duration);
-        lf_set_present(out);
+        // Do some actual computation
+        self->counter++;
+        int result = self->counter * self->id;
+        for (int i = 0; i < 10; i++) {
+            result += i * self->counter;
+        }
+        
+        // Sleep for a fixed duration (like TCP)
+        // lf_sleep(MSEC(100));
+        
+        lf_set(out, result);
     =}
 }
 
@@ -35,8 +46,8 @@ reactor Processing {
     input in2:int
     output out1:int
     output out2:int
-    m1 = new Middle(duration=100ms)
-    m2 = new Middle(duration=200ms)
+    m1 = new Middle(id=1)
+    m2 = new Middle(id=2)
     in1 -> m1.in
     in2 -> m2.in
     m1.out -> out1

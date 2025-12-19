@@ -1,0 +1,23 @@
+---
+gametime-project:
+  file:
+    location: client_reaction_function_0.c
+    analysis-function: _clientreaction_function_0
+    start-label: null
+    end-label: null
+
+
+  preprocess:
+    include: null
+    merge: null
+    inline: yes
+    unroll-loops: Yes
+
+  analysis:
+    maximum-error-scale-factor: 10
+    determinant-threshold: 0.001
+    max-infeasible-paths: 100
+    ilp-solver: glpk
+    gametime-flexpret-path: ../flexpret/
+    gametime-path: ../../
+    gametime-file-path: ../../../..

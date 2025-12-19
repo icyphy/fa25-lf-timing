@@ -1,0 +1,140 @@
+/**
+ * Counting benchmark with E2E timing measurement.
+ * Based on Counting.lf with added timing reactors for FlexPRET.
+ */
+target C {
+    platform: "FlexPRET",
+    single-threaded: true,
+    timeout: 1 sec
+}
+
+reactor ProducerReactor(countTo: int = 10) {
+    state i: int = 0
+    
+    input inStartCounting: bool
+    output outResetCounter: bool
+    output outIncrement: bool
+    output outRetrieveResult: bool
+    output finished: bool
+    input inResult: int
+    
+    logical action count
+    logical action outFinishedCounting
+    
+    reaction(startup) -> outResetCounter, count {=
+        // Initialize: reset counter and start counting
+        self->i = 0;
+        lf_set(outResetCounter, true);
+        lf_schedule(count, 0);
+    =}
+    
+    reaction(count) -> outIncrement, outRetrieveResult, count {=
+        if (self->i < self->countTo) {
+            lf_set(outIncrement, true);
+            self->i++;
+            lf_schedule(count, 0);
+        } else {
+            lf_set(outRetrieveResult, true);
+        }
+    =}
+    
+    reaction(inResult) -> outFinishedCounting, finished {=
+        if (inResult->value != self->countTo) {
+            // lf_print("ERROR: ProducerReactor expected %d, found: %d", 
+            //          self->countTo, inResult->value);
+        } else {
+            // lf_print("SUCCESS! received: %d", inResult->value);
+        }
+        lf_set(finished, true);
+        lf_schedule(outFinishedCounting, 0);
+    =}
+    
+    reaction(outFinishedCounting) {=
+        // lf_print("Counting finished.");
+    =}
+}
+
+reactor CountingReactor {
+    input inReset: bool
+    input inIncrement: bool
+    input inRetrieveResult: bool
+    output outSendResult: int
+    
+    state count: int = 0
+    
+    reaction(inReset) {=
+        self->count = 0;
+    =}
+    
+    reaction(inIncrement) {=
+        self->count++;
+    =}
+    
+    reaction(inRetrieveResult) -> outSendResult {=
+        lf_set(outSendResult, self->count);
+    =}
+}
+
+reactor Timer_Start {
+    output start_time: instant_t
+    timer t(0)
+    
+    reaction(t) -> start_time {=
+        instant_t t = lf_time_physical_elapsed();
+        lf_set(start_time, t);
+    =}
+}
+
+reactor Timer_End {
+    input finished: bool
+    output end_time: instant_t
+    
+    reaction(finished) -> end_time {=
+        instant_t t = lf_time_physical_elapsed();
+        lf_set(end_time, t);
+    =}
+}
+
+reactor Time_Elapsed_Calculator {
+    input start_time: instant_t
+    input end_time: instant_t
+    state saved_start_time: instant_t = -1
+    
+    reaction(start_time) {=
+        self->saved_start_time = start_time->value;
+    =}
+    
+    reaction(end_time) {=
+        if (self->saved_start_time >= 0) {
+            instant_t elapsed = end_time->value - self->saved_start_time;
+            lf_print("Time elapsed = %d ns", (int)elapsed);
+        }
+    =}
+}
+
+main reactor CountingTimingMeasure(countTo: int = 10) {
+    producer = new ProducerReactor(countTo=countTo)
+    counter = new CountingReactor()
+    timer_start = new Timer_Start()
+    timer_end = new Timer_End()
+    calc = new Time_Elapsed_Calculator()
+    
+    // Connections between producer and counter
+    producer.outIncrement -> counter.inIncrement
+    producer.outResetCounter -> counter.inReset
+    producer.outRetrieveResult -> counter.inRetrieveResult
+    counter.outSendResult -> producer.inResult
+    
+    // Timing connections
+    timer_start.start_time -> calc.start_time
+    producer.finished -> timer_end.finished
+    timer_end.end_time -> calc.end_time
+    
+    // reaction(startup) {=
+    //     lf_print("=== Counting Benchmark with Timing ===");
+    // =}
+    
+    reaction(producer.finished) {=
+        // lf_print("=== Benchmark Complete ===");
+    =}
+}

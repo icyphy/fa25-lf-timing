@@ -1,0 +1,97 @@
+/**
+ * Counting benchmark - simplified from Savina benchmark suite.
+ * Measures message passing overhead between reactors.
+ * Uses logical actions for iterative counting.
+ * 
+ * Simplified for GameTime WCET analysis (smaller countTo value).
+ */
+target C {
+    single-threaded: true,
+    timeout: 1 sec
+}
+
+reactor ProducerReactor(countTo: int = 10) {
+    state i: int = 0
+    
+    input inStartCounting: bool
+    output outResetCounter: bool
+    output outIncrement: bool
+    output outRetrieveResult: bool
+    output finished: bool
+    input inResult: int
+    
+    logical action count
+    logical action outFinishedCounting
+    
+    reaction(startup) -> outResetCounter, count {=
+        // Initialize: reset counter and start counting
+        self->i = 0;
+        lf_set(outResetCounter, true);
+        lf_schedule(count, 0);
+    =}
+    
+    reaction(count) -> outIncrement, outRetrieveResult, count {=
+        if (self->i < self->countTo) {
+            lf_set(outIncrement, true);
+            self->i++;
+            lf_schedule(count, 0);
+        } else {
+            lf_set(outRetrieveResult, true);
+        }
+    =}
+    
+    reaction(inResult) -> outFinishedCounting, finished {=
+        if (inResult->value != self->countTo) {
+            lf_print("ERROR: ProducerReactor expected %d, found: %d", 
+                     self->countTo, inResult->value);
+        } else {
+            lf_print("SUCCESS! received: %d", inResult->value);
+        }
+        lf_set(finished, true);
+        lf_schedule(outFinishedCounting, 0);
+    =}
+    
+    reaction(outFinishedCounting) {=
+        lf_print("Counting finished.");
+    =}
+}
+
+reactor CountingReactor {
+    input inReset: bool
+    input inIncrement: bool
+    input inRetrieveResult: bool
+    output outSendResult: int
+    
+    state count: int = 0
+    
+    reaction(inReset) {=
+        self->count = 0;
+    =}
+    
+    reaction(inIncrement) {=
+        self->count++;
+    =}
+    
+    reaction(inRetrieveResult) -> outSendResult {=
+        lf_set(outSendResult, self->count);
+    =}
+}
+
+main reactor Counting(countTo: int = 10) {
+    producer = new ProducerReactor(countTo=countTo)
+    counter = new CountingReactor()
+    
+    // Connections between producer and counter
+    producer.outIncrement -> counter.inIncrement
+    producer.outResetCounter -> counter.inReset
+    producer.outRetrieveResult -> counter.inRetrieveResult
+    counter.outSendResult -> producer.inResult
+    
+    reaction(startup) {=
+        lf_print("=== Counting Benchmark ===");
+    =}
+    
+    reaction(producer.finished) {=
+        lf_print("=== Benchmark Complete ===");
+    =}
+}

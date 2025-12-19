@@ -285,7 +285,16 @@ class LFToGameTimeConverter:
         with open(header_path, 'r') as f:
             content = f.read()
         
+        # Extract preamble from header if not already set (for federated programs)
+        if not self.preamble:
+            preamble_pattern = r'#define TOP_LEVEL_PREAMBLE_\w+_H\s*/\*.*?\*/(.+?)#endif\s*//\s*TOP_LEVEL_PREAMBLE'
+            preamble_match = re.search(preamble_pattern, content, re.DOTALL)
+            if preamble_match:
+                self.preamble = preamble_match.group(1).strip()
+                print(f"   ✓ Extracted preamble from header file")
+        
         # Extract state variables from *_self_t struct
+        # Handle both "struct worker_self_t {" and "struct worker_self_t{" (with/without space)
         self_pattern = rf'typedef\s+struct\s+{reactor_name}_self_t\s*\{{([^}}]+)\}}\s*{reactor_name}_self_t;'
         self_match = re.search(self_pattern, content, re.DOTALL)
         
@@ -296,10 +305,10 @@ class LFToGameTimeConverter:
                 # Skip base, end, comments
                 if line.startswith('//') or 'base' in line or 'end[' in line or not line:
                     continue
-                # Match: type name;
-                var_match = re.match(r'(\w+)\s+(\w+)\s*;', line)
+                # Match: type name; (including pointer types like "int*")
+                var_match = re.match(r'(\w+\s*\*?)\s+(\w+)\s*;', line)
                 if var_match:
-                    var_type = var_match.group(1)
+                    var_type = var_match.group(1).strip()
                     var_name = var_match.group(2)
                     if not var_name.startswith('_'):
                         state_vars[var_name] = var_type
@@ -600,7 +609,8 @@ class LFToGameTimeConverter:
 
             # Function signature with input ports and state variables as parameters
             has_output = len(output_vars) > 0
-            return_type = output_vars[0][1] if has_output else 'void'
+            # For multiple outputs, return void and use the first output type only for single output
+            return_type = output_vars[0][1] if len(output_vars) == 1 else 'void'
 
             params = []
             # Add state variables as pointers so they can be updated
@@ -626,9 +636,8 @@ class LFToGameTimeConverter:
 
             f.write(f"{return_type} {func_name}({param_str}) {{\n")
 
-            # Declare output variable if needed
-            if has_output:
-                output_var_name, output_var_type = output_vars[0]
+            # Declare ALL output variables
+            for output_var_name, output_var_type in output_vars:
                 f.write(f"    {output_var_type} __output_{output_var_name};\n")
 
             # Write reaction body (indent by 4 spaces)
@@ -658,10 +667,11 @@ class LFToGameTimeConverter:
                             line = re.sub(pattern, replacement, line)
                     f.write(f"    {line}\n")
 
-            # Return output if has output
-            if has_output:
+            # Return output if has single output
+            if len(output_vars) == 1:
                 output_var_name = output_vars[0][0]
                 f.write(f"    return __output_{output_var_name};\n")
+            # For multiple outputs, no return (they're side effects)
 
             f.write("}\n")
 
@@ -830,7 +840,9 @@ class LFToGameTimeConverter:
             f.write("int schedule_count = 0;\n\n")
             
             # Declare all state variables with actual init values from LF
+            # Use reactor-prefixed names to avoid conflicts when same var name used in multiple reactors
             f.write("// Global state variables from all reactors\n")
+            declared_vars = set()  # Track declared variable names to avoid duplicates
             for reactor_name, state_vars in self.state_vars.items():
                 f.write(f"// From {reactor_name} reactor:\n")
                 for var_name, var_type in state_vars.items():
@@ -843,14 +855,21 @@ class LFToGameTimeConverter:
                         if inst_type.lower() == reactor_name:
                             if inst_name in init_values and var_name in init_values[inst_name]:
                                 raw_init = init_values[inst_name][var_name]
-                                # Handle static initializers like "{ static int _initial = 0; helloworld_c_self[0]->count = _initial; }"
-                                if '_initial' in raw_init or 'static' in raw_init:
+                                # Handle static initializers or complex expressions
+                                if '_initial' in raw_init or 'static' in raw_init or '_self[' in raw_init:
                                     actual_init = default_init  # Fall back to default
                                 else:
                                     actual_init = raw_init
                             break
                     
-                    f.write(f"{var_type} {var_name} = {actual_init};\n")
+                    # Use prefixed name if there would be a conflict
+                    prefixed_name = f"{reactor_name}_{var_name}"
+                    if var_name in declared_vars:
+                        f.write(f"{var_type} {prefixed_name} = {actual_init};\n")
+                        declared_vars.add(prefixed_name)
+                    else:
+                        f.write(f"{var_type} {var_name} = {actual_init};\n")
+                        declared_vars.add(var_name)
             f.write("\n")
             
             # Forward declarations of reaction functions

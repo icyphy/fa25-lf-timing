@@ -3,7 +3,8 @@
  * Simplified version for local testing and WCET analysis.
  */
 target C {
-  timeout: 30 sec
+  timeout: 30 sec,
+  platform: "FlexPRET"
 }
 
 preamble {=
